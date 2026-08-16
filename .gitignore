@@ -1,0 +1,4 @@
+/target
+# A connection string is a credential.
+.env
+*.dsn

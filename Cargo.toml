@@ -1,0 +1,40 @@
+[package]
+name = "pgsow"
+version = "0.1.0"
+edition = "2021"
+description = "Reads a Postgres schema and generates data that satisfies it — or names the table it will not touch, and why"
+license = "MIT"
+repository = "https://github.com/Blahaj-gif/pgsow"
+keywords = ["postgres", "seed", "test-data", "fixtures", "database"]
+categories = ["command-line-utilities", "database"]
+rust-version = "1.75"
+
+[dependencies]
+# Postgres, synchronously. No async runtime: this is a CLI that does one job
+# and exits, and tokio would be a large dependency bought for nothing.
+postgres = "0.19"
+# Argument parsing. `derive` keeps the flags and their help text in one place,
+# so the two cannot drift.
+clap = { version = "4", features = ["derive", "env"] }
+# Deterministic value generation. `rand_chacha` rather than the default
+# generator because it is reproducible across platforms and versions, which is
+# the whole point — see generate::rng.
+rand = { version = "0.8", default-features = false, features = ["std"] }
+rand_chacha = "0.3"
+
+[dev-dependencies]
+# A real Postgres, downloaded and run per test, with no Docker and no install.
+# The entire correctness argument of this tool is that the database adjudicates,
+# so the tests need a database rather than a model of one.
+postgresql_embedded = "0.19"
+
+[features]
+# Integration tests download a Postgres on first run, so they are opt-in:
+#   cargo test                        unit tests, no network, no database
+#   cargo test --features integration everything, against a real Postgres
+integration = []
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "z"

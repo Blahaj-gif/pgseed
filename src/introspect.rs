@@ -1,0 +1,389 @@
+//! Reading the schema out of Postgres.
+//!
+//! From `pg_catalog`, not `information_schema`. The standard views are easier
+//! to read and lose exactly the things this needs: `information_schema` will
+//! not give you a CHECK constraint's expression, hides constraints on tables
+//! you do not own, and flattens identity and generated columns into a form
+//! that cannot be told apart. `pg_get_constraintdef` is worth the uglier SQL.
+//!
+//! Everything here is one query per *kind* of thing rather than one query per
+//! table. A schema of forty tables should cost five round trips, not two
+//! hundred, and the ordering of the results is made deterministic in SQL so
+//! the rest of the program never has to sort to stay reproducible.
+
+use std::collections::BTreeMap;
+
+use postgres::Client;
+
+use crate::schema::{
+    CheckConstraint, Column, ColumnType, ForeignKey, Schema, Table, TableId, UniqueKey,
+};
+
+/// Ordinary tables in the named schemas. Views, matviews, partitions and
+/// foreign tables are excluded: a view cannot be inserted into, and a
+/// partition is filled through its parent.
+const TABLES_SQL: &str = "
+    SELECT n.nspname, c.relname
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind = 'r'
+      AND NOT c.relispartition
+      AND n.nspname = ANY($1)
+    ORDER BY n.nspname, c.relname";
+
+/// Columns, with everything that decides whether and how to write one.
+///
+/// `attidentity` marks GENERATED ... AS IDENTITY and `attgenerated` marks a
+/// generated column; both must be left out of an insert entirely rather than
+/// merely defaulted, because naming them is an error rather than an override.
+const COLUMNS_SQL: &str = "
+    SELECT n.nspname, c.relname, a.attname, a.attnum,
+           a.attnotnull, a.atthasdef,
+           (a.attidentity <> '' OR a.attgenerated <> '') AS generated,
+           t.typname, t.typtype, a.atttypmod, a.attndims,
+           bt.typname AS base_typname, bt.typtype AS base_typtype,
+           EXISTS (SELECT 1 FROM pg_constraint dc
+                   WHERE dc.contypid = t.oid AND dc.contype = 'c') AS domain_checked,
+           et.typname AS element_typname, et.typtype AS element_typtype
+    FROM pg_attribute a
+    JOIN pg_class c ON c.oid = a.attrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_type t ON t.oid = a.atttypid
+    LEFT JOIN pg_type bt ON bt.oid = t.typbasetype
+    LEFT JOIN pg_type et ON et.oid = t.typelem
+    WHERE c.relkind = 'r'
+      AND NOT c.relispartition
+      AND n.nspname = ANY($1)
+      AND a.attnum > 0
+      AND NOT a.attisdropped
+    ORDER BY n.nspname, c.relname, a.attnum";
+
+/// Every constraint that matters, with its definition text.
+///
+/// `conkey` and `confkey` are attribute-number arrays, resolved to names in
+/// SQL so the caller never has to hold a second lookup table. The ordinality
+/// join keeps composite-key columns in their declared order, which is the
+/// order the referencing and referenced sides have to agree on.
+const CONSTRAINTS_SQL: &str = "
+    SELECT n.nspname, c.relname, con.conname, con.contype,
+           con.condeferrable,
+           pg_get_constraintdef(con.oid) AS definition,
+           (SELECT array_agg(att.attname ORDER BY k.ord)
+              FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+              JOIN pg_attribute att
+                ON att.attrelid = con.conrelid AND att.attnum = k.attnum
+           ) AS columns,
+           fn.nspname AS ref_schema, fc.relname AS ref_table,
+           (SELECT array_agg(att.attname ORDER BY k.ord)
+              FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord)
+              JOIN pg_attribute att
+                ON att.attrelid = con.confrelid AND att.attnum = k.attnum
+           ) AS ref_columns
+    FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_class fc ON fc.oid = con.confrelid
+    LEFT JOIN pg_namespace fn ON fn.oid = fc.relnamespace
+    WHERE con.contype IN ('p', 'f', 'u', 'c')
+      AND n.nspname = ANY($1)
+    ORDER BY n.nspname, c.relname, con.conname";
+
+/// Enum labels, in declaration order — which is the order a person means when
+/// they say "the first status".
+const ENUMS_SQL: &str = "
+    SELECT t.typname, e.enumlabel
+    FROM pg_enum e
+    JOIN pg_type t ON t.oid = e.enumtypid
+    ORDER BY t.typname, e.enumsortorder";
+
+/// Map what Postgres calls a type to what this tool can do about it.
+///
+/// A pure function, and unit tested, because it is the part most likely to be
+/// quietly wrong and the part that does not need a database to check. An
+/// unrecognised name becomes `Unsupported` carrying that name rather than a
+/// guess: a column this cannot generate must refuse its table by name.
+pub fn map_type(
+    typname: &str,
+    typtype: &str,
+    typmod: i32,
+    ndims: i32,
+    base: Option<(&str, &str)>,
+    domain_checked: bool,
+    element: Option<(&str, &str)>,
+    enums: &BTreeMap<String, Vec<String>>,
+) -> ColumnType {
+    // Enum, before anything else: its name is user-chosen and could collide
+    // with a built-in.
+    if typtype == "e" {
+        return ColumnType::Enum {
+            name: typname.to_string(),
+            labels: enums.get(typname).cloned().unwrap_or_default(),
+        };
+    }
+
+    // Domain: generate for the underlying type, unless the domain adds a
+    // constraint, which is a CHECK by another name and refused like one.
+    if typtype == "d" {
+        let inner = match base {
+            Some((base_name, base_type)) => map_type(
+                base_name, base_type, typmod, 0, None, false, None, enums,
+            ),
+            None => ColumnType::Unsupported { name: typname.to_string() },
+        };
+        return ColumnType::Domain {
+            name: typname.to_string(),
+            inner: Box::new(inner),
+            has_constraint: domain_checked,
+        };
+    }
+
+    // Arrays: Postgres names them with a leading underscore.
+    if let Some(stripped) = typname.strip_prefix('_') {
+        let of = match element {
+            Some((el_name, el_type)) => {
+                map_type(el_name, el_type, typmod, 0, None, false, None, enums)
+            }
+            None => map_type(stripped, "b", typmod, 0, None, false, None, enums),
+        };
+        return ColumnType::Array {
+            of: Box::new(of),
+            dimensions: if ndims > 0 { ndims } else { 1 },
+        };
+    }
+
+    // `atttypmod` carries the declared length or precision, offset by four
+    // for the length header. -1 means unlimited.
+    let length = if typmod > 4 { Some(typmod - 4) } else { None };
+
+    match typname {
+        "bool" => ColumnType::Boolean,
+        "int2" => ColumnType::Integer { bytes: 2 },
+        "int4" => ColumnType::Integer { bytes: 4 },
+        "int8" => ColumnType::Integer { bytes: 8 },
+        "float4" => ColumnType::Float { bytes: 4 },
+        "float8" => ColumnType::Float { bytes: 8 },
+        "numeric" => {
+            let (precision, scale) = if typmod > 4 {
+                let packed = typmod - 4;
+                (Some(packed >> 16), Some(packed & 0xffff))
+            } else {
+                (None, None)
+            };
+            ColumnType::Numeric { precision, scale }
+        }
+        "varchar" | "bpchar" => ColumnType::Text { max_length: length },
+        "text" | "name" | "citext" => ColumnType::Text { max_length: None },
+        "uuid" => ColumnType::Uuid,
+        "date" => ColumnType::Date,
+        "time" | "timetz" => ColumnType::Time,
+        "timestamp" => ColumnType::Timestamp { with_zone: false },
+        "timestamptz" => ColumnType::Timestamp { with_zone: true },
+        "interval" => ColumnType::Interval,
+        "json" => ColumnType::Json { binary: false },
+        "jsonb" => ColumnType::Json { binary: true },
+        "bytea" => ColumnType::Bytea,
+        other => ColumnType::Unsupported { name: other.to_string() },
+    }
+}
+
+/// Read every table in the named schemas.
+pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres::Error> {
+    let enums = read_enums(client)?;
+    let mut schema = Schema::default();
+
+    for row in client.query(TABLES_SQL, &[&schemas])? {
+        let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
+        schema.tables.insert(
+            id.clone(),
+            Table { id, columns: vec![], foreign_keys: vec![], unique_keys: vec![], checks: vec![] },
+        );
+    }
+
+    for row in client.query(COLUMNS_SQL, &[&schemas])? {
+        let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
+        let Some(table) = schema.tables.get_mut(&id) else { continue };
+
+        let typname: String = row.get("typname");
+        let typtype: i8 = row.get("typtype");
+        let base_typname: Option<String> = row.get("base_typname");
+        let base_typtype: Option<i8> = row.get("base_typtype");
+        let element_typname: Option<String> = row.get("element_typname");
+        let element_typtype: Option<i8> = row.get("element_typtype");
+
+        let base_typtype = base_typtype.map(|c| (c as u8 as char).to_string());
+        let element_typtype = element_typtype.map(|c| (c as u8 as char).to_string());
+
+        let type_ = map_type(
+            &typname,
+            &(typtype as u8 as char).to_string(),
+            row.get::<_, i32>("atttypmod"),
+            row.get::<_, i32>("attndims"),
+            base_typname.as_deref().zip(base_typtype.as_deref()),
+            row.get::<_, bool>("domain_checked"),
+            element_typname.as_deref().zip(element_typtype.as_deref()),
+            &enums,
+        );
+
+        table.columns.push(Column {
+            name: row.get("attname"),
+            type_,
+            nullable: !row.get::<_, bool>("attnotnull"),
+            has_default: row.get::<_, bool>("atthasdef"),
+            is_generated: row.get::<_, bool>("generated"),
+            position: row.get::<_, i16>("attnum") as i32,
+        });
+    }
+
+    for row in client.query(CONSTRAINTS_SQL, &[&schemas])? {
+        let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
+        let Some(table) = schema.tables.get_mut(&id) else { continue };
+
+        let name: String = row.get("conname");
+        let kind = row.get::<_, i8>("contype") as u8 as char;
+        let columns: Vec<String> = row.try_get("columns").unwrap_or_default();
+
+        match kind {
+            'p' | 'u' => table.unique_keys.push(UniqueKey {
+                name,
+                columns,
+                is_primary: kind == 'p',
+            }),
+            'f' => {
+                let ref_schema: Option<String> = row.get("ref_schema");
+                let ref_table: Option<String> = row.get("ref_table");
+                if let (Some(s), Some(t)) = (ref_schema, ref_table) {
+                    table.foreign_keys.push(ForeignKey {
+                        name,
+                        columns,
+                        references: TableId::new(s, t),
+                        referenced_columns: row.try_get("ref_columns").unwrap_or_default(),
+                        deferrable: row.get::<_, bool>("condeferrable"),
+                    });
+                }
+            }
+            'c' => table.checks.push(CheckConstraint {
+                name,
+                definition: row.get("definition"),
+            }),
+            _ => {}
+        }
+    }
+
+    Ok(schema)
+}
+
+fn read_enums(client: &mut Client) -> Result<BTreeMap<String, Vec<String>>, postgres::Error> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for row in client.query(ENUMS_SQL, &[])? {
+        out.entry(row.get::<_, String>(0)).or_default().push(row.get::<_, String>(1));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn no_enums() -> BTreeMap<String, Vec<String>> {
+        BTreeMap::new()
+    }
+
+    fn map(typname: &str, typmod: i32) -> ColumnType {
+        map_type(typname, "b", typmod, 0, None, false, None, &no_enums())
+    }
+
+    #[test]
+    fn the_ordinary_types_are_recognised() {
+        assert_eq!(map("int4", -1), ColumnType::Integer { bytes: 4 });
+        assert_eq!(map("int8", -1), ColumnType::Integer { bytes: 8 });
+        assert_eq!(map("bool", -1), ColumnType::Boolean);
+        assert_eq!(map("uuid", -1), ColumnType::Uuid);
+        assert_eq!(map("jsonb", -1), ColumnType::Json { binary: true });
+        assert_eq!(map("timestamptz", -1), ColumnType::Timestamp { with_zone: true });
+    }
+
+    #[test]
+    fn a_declared_length_is_carried_so_a_value_can_fit_it() {
+        // varchar(20) arrives as atttypmod 24: the length plus a four-byte
+        // header. Writing 30 characters into it is a runtime error.
+        assert_eq!(map("varchar", 24), ColumnType::Text { max_length: Some(20) });
+        assert_eq!(map("varchar", -1), ColumnType::Text { max_length: None });
+        assert_eq!(map("text", -1), ColumnType::Text { max_length: None });
+    }
+
+    #[test]
+    fn numeric_precision_and_scale_are_unpacked() {
+        // numeric(10,2) packs both into one integer: precision in the high
+        // half, scale in the low. Getting this backwards puts the decimal
+        // point in the wrong place on every money column in the database.
+        let packed = ((10 << 16) | 2) + 4;
+        assert_eq!(
+            map("numeric", packed),
+            ColumnType::Numeric { precision: Some(10), scale: Some(2) }
+        );
+        assert_eq!(map("numeric", -1), ColumnType::Numeric { precision: None, scale: None });
+    }
+
+    #[test]
+    fn an_unknown_type_keeps_its_name_for_the_refusal_message() {
+        assert_eq!(
+            map("geometry", -1),
+            ColumnType::Unsupported { name: "geometry".into() }
+        );
+    }
+
+    #[test]
+    fn an_enum_carries_its_labels_in_declaration_order() {
+        let mut enums = BTreeMap::new();
+        enums.insert("status".to_string(),
+                     vec!["pending".to_string(), "shipped".to_string()]);
+        let t = map_type("status", "e", -1, 0, None, false, None, &enums);
+        match t {
+            ColumnType::Enum { name, labels } => {
+                assert_eq!(name, "status");
+                assert_eq!(labels, vec!["pending", "shipped"]);
+            }
+            other => panic!("expected an enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_domain_without_a_check_is_generated_as_its_base_type() {
+        let t = map_type("email", "d", -1, 0, Some(("text", "b")), false, None, &no_enums());
+        assert!(t.is_generatable());
+        match &t {
+            ColumnType::Domain { inner, has_constraint, .. } => {
+                assert_eq!(**inner, ColumnType::Text { max_length: None });
+                assert!(!has_constraint);
+            }
+            other => panic!("expected a domain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_domain_with_a_check_is_not_generatable() {
+        // `CREATE DOMAIN positive AS int CHECK (VALUE > 0)` needs the same
+        // expression solving a table CHECK does, so it gets the same answer.
+        let t = map_type("positive", "d", -1, 0, Some(("int4", "b")), true, None, &no_enums());
+        assert!(!t.is_generatable());
+    }
+
+    #[test]
+    fn an_array_is_recognised_by_its_leading_underscore() {
+        let t = map_type("_int4", "b", -1, 1, None, false, Some(("int4", "b")), &no_enums());
+        match t {
+            ColumnType::Array { of, dimensions } => {
+                assert_eq!(*of, ColumnType::Integer { bytes: 4 });
+                assert_eq!(dimensions, 1);
+            }
+            other => panic!("expected an array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_array_of_an_unknown_type_is_still_unknown() {
+        let t = map_type("_geometry", "b", -1, 1, None, false, Some(("geometry", "b")), &no_enums());
+        assert!(!t.is_generatable());
+        assert_eq!(t.describe(), "geometry[]");
+    }
+}
