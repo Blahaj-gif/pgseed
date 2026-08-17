@@ -79,7 +79,12 @@ pub enum ColumnType {
     /// a DNS server's entire schema for one column.
     Network { kind: NetworkKind },
     /// A user-defined enum, with its labels in declaration order.
-    Enum { name: String, labels: Vec<String> },
+    ///
+    /// `qualified` is the schema-qualified, quoted name — what has to be
+    /// written to cast an array of these. `None` when two schemas define an
+    /// enum of the same name, because then the bare name this was looked up
+    /// by does not identify one of them.
+    Enum { name: String, qualified: Option<String>, labels: Vec<String> },
     /// A domain wraps another type and may add constraints of its own. The
     /// inner type is kept so the value can be produced; `has_constraint` is
     /// what forces a refusal, since a domain constraint is a CHECK by another
@@ -102,6 +107,46 @@ impl ColumnType {
             ColumnType::Array { of, .. } => of.is_generatable(),
             _ => true,
         }
+    }
+
+    /// The Postgres name for this type, where writing one is unambiguous.
+    ///
+    /// Needed because `ARRAY['x']` types itself as `text[]` the moment it is
+    /// written, and `text[]` does not implicitly become `jsonb[]` or `inet[]`.
+    /// The array has to say what it is.
+    ///
+    /// `None` for domains and unrecognised types, and for an enum whose name
+    /// is ambiguous across schemas — naming one then would be a guess.
+    pub fn sql_name(&self) -> Option<String> {
+        Some(match self {
+            ColumnType::Boolean => "boolean",
+            ColumnType::Integer { bytes: 2 } => "smallint",
+            ColumnType::Integer { bytes: 8 } => "bigint",
+            ColumnType::Integer { .. } => "integer",
+            ColumnType::Numeric { .. } => "numeric",
+            ColumnType::Float { bytes: 4 } => "real",
+            ColumnType::Float { .. } => "double precision",
+            ColumnType::Text { .. } => "text",
+            ColumnType::Uuid => "uuid",
+            ColumnType::Date => "date",
+            ColumnType::Time => "time",
+            ColumnType::Timestamp { with_zone: true } => "timestamptz",
+            ColumnType::Timestamp { .. } => "timestamp",
+            ColumnType::Interval => "interval",
+            ColumnType::Json { binary: true } => "jsonb",
+            ColumnType::Json { .. } => "json",
+            ColumnType::Bytea => "bytea",
+            ColumnType::Network { kind: NetworkKind::Inet } => "inet",
+            ColumnType::Network { kind: NetworkKind::Cidr } => "cidr",
+            ColumnType::Network { kind: NetworkKind::MacAddr } => "macaddr",
+            // An enum can be named when it is unambiguous, which is what
+            // lets `ARRAY['sad']::public."mood"[]` be written at all.
+            ColumnType::Enum { qualified, .. } => return qualified.clone(),
+            ColumnType::Domain { .. }
+            | ColumnType::Array { .. }
+            | ColumnType::Unsupported { .. } => return None,
+        }
+        .to_string())
     }
 
     /// The name to use when explaining a refusal.
@@ -131,6 +176,10 @@ pub struct Column {
     /// A column with a default can be omitted from the insert entirely, which
     /// is usually the right thing for `id` and `created_at`.
     pub has_default: bool,
+    /// Whether that default reads from a sequence. A sequence default is
+    /// already distinct on every row; a constant one — `DEFAULT 1` — is the
+    /// same value every time, which matters the moment the column is UNIQUE.
+    pub default_is_sequence: bool,
     /// `GENERATED ALWAYS AS IDENTITY` and generated columns must *not* be
     /// written to; an insert that names them fails outright.
     pub is_generated: bool,
@@ -218,8 +267,22 @@ impl Table {
     pub fn columns_to_write(&self) -> Vec<&Column> {
         self.columns
             .iter()
-            .filter(|c| !c.is_generated && !c.has_default)
+            .filter(|c| !c.is_generated && (!c.has_default || self.default_will_not_do(c)))
             .collect()
+    }
+
+    /// Whether leaving this column to its default would break a unique key.
+    ///
+    /// `resource_version INTEGER NOT NULL DEFAULT 1 UNIQUE` is a real column
+    /// in a real schema. Omitting it gives every row the value 1, and the
+    /// second row is rejected. A sequence default is fine — that is what a
+    /// sequence is for — and a generated column is never written at all.
+    fn default_will_not_do(&self, column: &Column) -> bool {
+        !column.default_is_sequence
+            && self
+                .unique_keys
+                .iter()
+                .any(|k| k.columns.iter().any(|c| *c == column.name))
     }
 
     pub fn primary_key(&self) -> Option<&UniqueKey> {
@@ -328,6 +391,8 @@ mod tests {
             type_: ColumnType::Integer { bytes: 4 },
             nullable,
             has_default,
+            // Fixtures without a unique key never reach the sequence question.
+            default_is_sequence: false,
             is_generated: generated,
             position: 1,
         }

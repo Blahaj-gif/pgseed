@@ -261,6 +261,7 @@ mod tests {
             type_,
             nullable,
             has_default: false,
+            default_is_sequence: false,
             is_generated: false,
             position: 1,
         }

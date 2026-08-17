@@ -348,3 +348,125 @@ fn a_join_table_cannot_have_more_rows_than_the_pairs_available() {
         .get(0);
     assert_eq!(distinct, 20, "the pairs repeated");
 }
+
+/// A composite unique key has to be distinct as a tuple.
+///
+/// Only single-column keys were ever handled, so `PRIMARY KEY (first, last)`
+/// drew both names from a sixteen-word list and collided almost at once. Taken
+/// straight from PostgREST's test schema, where it did.
+#[test]
+fn a_composite_key_does_not_repeat_a_pair() {
+    let (db, _) = seed(
+        "CREATE TABLE employees (
+             first_name text,
+             last_name  text,
+             salary     numeric,
+             PRIMARY KEY (first_name, last_name)
+         );
+         CREATE TABLE account_data (
+             user_id           text NOT NULL,
+             account_data_type text NOT NULL,
+             content           text,
+             CONSTRAINT account_data_uniqueness UNIQUE (user_id, account_data_type)
+         );",
+        30,
+    );
+    assert_eq!(count(&db, "employees"), 30);
+    assert_eq!(count(&db, "account_data"), 30);
+}
+
+/// A constant default cannot serve a unique constraint.
+///
+/// `resource_version INTEGER NOT NULL DEFAULT 1 UNIQUE` is Hasura's, and
+/// leaving it to its default gave every row the value 1. A sequence default is
+/// a different matter and must still be left alone, or the sequence and the
+/// rows disagree about what has been used.
+#[test]
+fn a_constant_default_under_a_unique_key_is_written_rather_than_defaulted() {
+    let (db, sql) = seed(
+        "CREATE TABLE metadata (
+             id               serial PRIMARY KEY,
+             resource_version integer NOT NULL DEFAULT 1 UNIQUE,
+             payload          text
+         );",
+        6,
+    );
+    assert_eq!(count(&db, "metadata"), 6);
+    assert!(sql.contains("resource_version"), "it was left to the default");
+    assert!(!sql.contains("\"id\""), "a sequence default should be left alone: {sql}");
+
+    // The sequence and the rows must still agree, or the next real insert
+    // collides with a row this wrote.
+    let next: i32 = db
+        .client()
+        .query_one("SELECT nextval('metadata_id_seq')::int", &[])
+        .unwrap()
+        .get(0);
+    assert!(next > 6, "the sequence fell behind the rows: {next}");
+}
+
+/// Arrays of things that are not text.
+///
+/// `ARRAY['x']` is a `text[]` from the moment it is written, and `text[]` does
+/// not implicitly become `jsonb[]` or `inet[]`. Three of the nine real schemas
+/// were rejected on exactly this. The enum and domain cases are in here not
+/// because they are known to work but because this is where it gets found out.
+#[test]
+fn an_array_carries_the_type_of_what_is_in_it() {
+    let (db, _) = seed(
+        "CREATE TYPE mood AS ENUM ('sad', 'ok');
+         CREATE DOMAIN short AS text;
+         CREATE TABLE arrays (
+             id      int PRIMARY KEY,
+             blobs   jsonb[],
+             docs    json[],
+             hosts   inet[],
+             nets    cidr[],
+             stamps  timestamptz[],
+             ids     uuid[],
+             counts  bigint[],
+             moods   mood[],
+             notes   short[]
+         );",
+        4,
+    );
+    assert_eq!(count(&db, "arrays"), 4);
+}
+
+/// An exclusion constraint is a rule, whether or not it is read.
+///
+/// GitLab builds `daterange(start_date, due_date)` inside an EXCLUDE and this
+/// generated the two dates independently, so half the time the range came out
+/// backwards and Postgres refused it. The constraint was never read at all —
+/// `contype = 'x'` was not in the query — and a constraint that is not seen is
+/// not thereby satisfied.
+#[test]
+fn an_exclusion_constraint_refuses_its_table_rather_than_guessing() {
+    let db = Db::start();
+    db.apply(
+        "CREATE EXTENSION IF NOT EXISTS btree_gist;
+         CREATE TABLE sprints (
+             id         int PRIMARY KEY,
+             group_id   int NOT NULL,
+             start_date date,
+             due_date   date,
+             EXCLUDE USING gist (
+                 group_id WITH =,
+                 daterange(start_date, due_date, '[]'::text) WITH &&
+             )
+         );
+         CREATE TABLE plain (id int PRIMARY KEY);",
+    );
+
+    let mut client = db.client();
+    let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = graph::order(&schema);
+    let verdict = classify::classify(&schema, &order);
+
+    assert!(verdict.is_refused(&pgsow::schema::TableId::new("public", "sprints")));
+    assert_eq!(verdict.fillable.len(), 1, "the plain table is untouched by this");
+
+    let (_, reasons) = verdict.refused.iter().find(|(t, _)| t.name == "sprints").unwrap();
+    let text = reasons[0].explain();
+    assert!(text.contains("EXCLUDE"), "the rule should be quoted back: {text}");
+}

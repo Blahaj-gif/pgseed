@@ -213,8 +213,10 @@ fn measure(name: &str, path: &Path) {
                 // A CHECK violation is the one that matters: it is data that
                 // breaks a rule the schema stated, which is the exact failure
                 // this project was built to refuse rather than commit.
-                if matches!(code.as_str(), "23514" | "22000") {
-                    println!("      DOCTRINE {code}: {}",
+                if matches!(code.as_str(), "23514" | "22000" | "23503") {
+                    let head: String =
+                        statement.lines().next().unwrap_or("").chars().take(60).collect();
+                    println!("      DOCTRINE {code}: {} | {head}",
                         e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().into()));
                 }
                 if first_failures.len() < 3 {
@@ -240,13 +242,23 @@ fn measure(name: &str, path: &Path) {
         println!("      rejected: {failure}");
     }
 
-    // Reported, not asserted, on this first run. The number is the finding;
-    // turning it into a gate is the next commit, once it is known what the
-    // number even is. A gate set to whatever today's figure happens to be
-    // measures nothing.
-    if rejected > 0 {
-        eprintln!("  {name}: {rejected} of {} statements rejected", statements.len());
-    }
+    // The pre-registered gate, and it is zero rather than a percentage.
+    //
+    // It was reported rather than asserted for exactly one commit, because a
+    // gate set to whatever the figure happened to be would have measured
+    // nothing. The figure was 43 rejections in 1,370 statements. Four bugs
+    // later it is none, so this is now a gate a regression trips.
+    //
+    // The whole thesis is that the database adjudicates: one row it refuses is
+    // a failure, not a percentage to be pleased with.
+    assert_eq!(
+        rejected, 0,
+        "{name}: Postgres rejected {rejected} of {} generated statements. 
+         The gate is zero — the database is the oracle, and a row it refuses 
+         is a row this should have refused first.
+{first_failures:#?}",
+        statements.len()
+    );
 }
 
 #[test]

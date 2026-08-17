@@ -16,7 +16,8 @@ use std::collections::BTreeMap;
 use postgres::Client;
 
 use crate::schema::{
-    CheckConstraint, Column, ColumnType, ForeignKey, Schema, Table, TableId, UniqueKey,
+    quote_ident, CheckConstraint, Column, ColumnType, ForeignKey, Schema, Table, TableId,
+    UniqueKey,
 };
 
 /// Ordinary tables in the named schemas. Views, matviews, partitions and
@@ -40,6 +41,8 @@ const COLUMNS_SQL: &str = "
     SELECT n.nspname, c.relname, a.attname, a.attnum,
            a.attnotnull, a.atthasdef,
            (a.attidentity <> '' OR a.attgenerated <> '') AS generated,
+           COALESCE(pg_get_expr(ad.adbin, ad.adrelid) LIKE 'nextval(%', false)
+             AS default_is_sequence,
            t.typname, t.typtype, a.atttypmod, a.attndims,
            bt.typname AS base_typname, bt.typtype AS base_typtype,
            EXISTS (SELECT 1 FROM pg_constraint dc
@@ -51,6 +54,7 @@ const COLUMNS_SQL: &str = "
     JOIN pg_type t ON t.oid = a.atttypid
     LEFT JOIN pg_type bt ON bt.oid = t.typbasetype
     LEFT JOIN pg_type et ON et.oid = t.typelem
+    LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
     WHERE c.relkind = 'r'
       AND NOT c.relispartition
       AND n.nspname = ANY($1)
@@ -84,17 +88,18 @@ const CONSTRAINTS_SQL: &str = "
     JOIN pg_namespace n ON n.oid = c.relnamespace
     LEFT JOIN pg_class fc ON fc.oid = con.confrelid
     LEFT JOIN pg_namespace fn ON fn.oid = fc.relnamespace
-    WHERE con.contype IN ('p', 'f', 'u', 'c')
+    WHERE con.contype IN ('p', 'f', 'u', 'c', 'x')
       AND n.nspname = ANY($1)
     ORDER BY n.nspname, c.relname, con.conname";
 
 /// Enum labels, in declaration order — which is the order a person means when
 /// they say "the first status".
 const ENUMS_SQL: &str = "
-    SELECT t.typname, e.enumlabel
+    SELECT t.typname, n.nspname, e.enumlabel
     FROM pg_enum e
     JOIN pg_type t ON t.oid = e.enumtypid
-    ORDER BY t.typname, e.enumsortorder";
+    JOIN pg_namespace n ON n.oid = t.typnamespace
+    ORDER BY t.typname, n.nspname, e.enumsortorder";
 
 /// Map what Postgres calls a type to what this tool can do about it.
 ///
@@ -110,14 +115,16 @@ pub fn map_type(
     base: Option<(&str, &str)>,
     domain_checked: bool,
     element: Option<(&str, &str)>,
-    enums: &BTreeMap<String, Vec<String>>,
+    enums: &BTreeMap<String, EnumType>,
 ) -> ColumnType {
     // Enum, before anything else: its name is user-chosen and could collide
     // with a built-in.
     if typtype == "e" {
+        let found = enums.get(typname).cloned().unwrap_or_default();
         return ColumnType::Enum {
             name: typname.to_string(),
-            labels: enums.get(typname).cloned().unwrap_or_default(),
+            qualified: found.qualified,
+            labels: found.labels,
         };
     }
 
@@ -238,6 +245,7 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
             type_,
             nullable: !row.get::<_, bool>("attnotnull"),
             has_default: row.get::<_, bool>("atthasdef"),
+            default_is_sequence: row.get::<_, bool>("default_is_sequence"),
             is_generated: row.get::<_, bool>("generated"),
             position: row.get::<_, i16>("attnum") as i32,
         });
@@ -270,7 +278,13 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
                     });
                 }
             }
-            'c' => table.checks.push(CheckConstraint {
+            // An exclusion constraint is read as a check, which is what it is:
+            // a rule over the row that this cannot prove it satisfies. GitLab
+            // has four, and two of them build `daterange(start_date, due_date)`
+            // out of two columns generated independently — so half the time
+            // the range came out backwards. Not seeing a constraint is not the
+            // same as satisfying it.
+            'c' | 'x' => table.checks.push(CheckConstraint {
                 name,
                 definition: row.get("definition"),
             }),
@@ -281,10 +295,42 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
     Ok(schema)
 }
 
-fn read_enums(client: &mut Client) -> Result<BTreeMap<String, Vec<String>>, postgres::Error> {
-    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+/// An enum's labels, and the name that can be written for it in SQL.
+///
+/// `qualified` is `None` where two schemas define an enum of the same name:
+/// columns are looked up by bare type name, so at that point the bare name
+/// does not say which one, and writing either would be a guess.
+#[derive(Debug, Clone, Default)]
+pub struct EnumType {
+    pub qualified: Option<String>,
+    pub labels: Vec<String>,
+}
+
+fn read_enums(client: &mut Client) -> Result<BTreeMap<String, EnumType>, postgres::Error> {
+    let mut seen: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
     for row in client.query(ENUMS_SQL, &[])? {
-        out.entry(row.get::<_, String>(0)).or_default().push(row.get::<_, String>(1));
+        seen.entry(row.get::<_, String>(0))
+            .or_default()
+            .entry(row.get::<_, String>(1))
+            .or_default()
+            .push(row.get::<_, String>(2));
+    }
+
+    let mut out: BTreeMap<String, EnumType> = BTreeMap::new();
+    for (typname, by_schema) in seen {
+        let ambiguous = by_schema.len() > 1;
+        // Labels from the first schema either way: a value still has to be
+        // produced, and only the *name* is in doubt.
+        let (namespace, labels) = by_schema.into_iter().next().expect("non-empty");
+        out.insert(
+            typname.clone(),
+            EnumType {
+                qualified: (!ambiguous).then(|| {
+                    format!("{}.{}", quote_ident(&namespace), quote_ident(&typname))
+                }),
+                labels,
+            },
+        );
     }
     Ok(out)
 }
@@ -293,7 +339,7 @@ fn read_enums(client: &mut Client) -> Result<BTreeMap<String, Vec<String>>, post
 mod tests {
     use super::*;
 
-    fn no_enums() -> BTreeMap<String, Vec<String>> {
+    fn no_enums() -> BTreeMap<String, EnumType> {
         BTreeMap::new()
     }
 
@@ -344,13 +390,17 @@ mod tests {
     #[test]
     fn an_enum_carries_its_labels_in_declaration_order() {
         let mut enums = BTreeMap::new();
-        enums.insert("status".to_string(),
-                     vec!["pending".to_string(), "shipped".to_string()]);
+        enums.insert("status".to_string(), EnumType {
+            qualified: Some("\"public\".\"status\"".into()),
+            labels: vec!["pending".to_string(), "shipped".to_string()],
+        });
         let t = map_type("status", "e", -1, 0, None, false, None, &enums);
         match t {
-            ColumnType::Enum { name, labels } => {
+            ColumnType::Enum { name, labels, qualified } => {
                 assert_eq!(name, "status");
                 assert_eq!(labels, vec!["pending", "shipped"]);
+                // The qualified name is what an array of these is cast to.
+                assert_eq!(qualified.as_deref(), Some("\"public\".\"status\""));
             }
             other => panic!("expected an enum, got {other:?}"),
         }

@@ -109,6 +109,44 @@ fn covering_key<'t>(table: &'t Table, column: &str) -> Option<&'t ForeignKey> {
         .find(|fk| fk.columns.iter().any(|c| c == column))
 }
 
+/// Columns the generator must vary per row, so that no unique key repeats.
+///
+/// A single-column key is the easy case and was the only one handled: vary
+/// that column and it is unique. A composite key had nothing done for it at
+/// all, so `PRIMARY KEY (first_name, last_name)` drew both names from a
+/// sixteen-word list and collided almost immediately.
+///
+/// A tuple is distinct as soon as *one* of its columns is, so only one column
+/// per key needs to vary. It has to be one that actually can: not drawn from a
+/// parent, where the values are whatever the parent had, and not of a type
+/// with fewer values than there are rows — varying a boolean gives two of
+/// everything, whatever the row index says.
+///
+/// **Known limit:** a composite key made entirely of bounded columns —
+/// `UNIQUE (is_active, status)` — has no column that can carry the whole
+/// tuple's distinctness, and would need the columns walked as an odometer.
+/// `capacity` still caps the row count at the product, so the failure is a
+/// duplicate rather than an overflow, but it is a gap and it is not closed.
+pub fn varying_columns(table: &Table) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for key in &table.unique_keys {
+        if key.columns.len() == 1 {
+            out.insert(key.columns[0].clone());
+            continue;
+        }
+        let chosen = key.columns.iter().find(|name| {
+            covering_key(table, name).is_none()
+                && table
+                    .column(name)
+                    .is_some_and(|c| domain_size(&c.type_).is_none())
+        });
+        if let Some(name) = chosen {
+            out.insert(name.clone());
+        }
+    }
+    out
+}
+
 /// How far apart consecutive rows step through each parent's pool.
 ///
 /// Where a unique key is made entirely of foreign keys — a join table — the
@@ -182,6 +220,7 @@ mod tests {
             type_,
             nullable: false,
             has_default: false,
+            default_is_sequence: false,
             is_generated: false,
             position: 1,
         }
@@ -215,6 +254,7 @@ mod tests {
         assert_eq!(
             domain_size(&ColumnType::Enum {
                 name: "mood".into(),
+                qualified: None,
                 labels: vec!["sad".into(), "ok".into(), "happy".into()],
             }),
             Some(3)
@@ -248,6 +288,7 @@ mod tests {
                     "state",
                     ColumnType::Enum {
                         name: "s".into(),
+                        qualified: None,
                         labels: vec!["a".into(), "b".into(), "c".into()],
                     },
                 ),

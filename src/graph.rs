@@ -360,6 +360,7 @@ mod tests {
             type_: ColumnType::Integer { bytes: 4 },
             nullable,
             has_default: false,
+            default_is_sequence: false,
             is_generated: false,
             position: 1,
         }

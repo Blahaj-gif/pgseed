@@ -314,8 +314,17 @@ fn render(
         // One element is enough to be a valid array, and a longer one only
         // makes a failure harder to read.
         ColumnType::Array { of, .. } => {
+            // The cast is the whole point. `ARRAY['{}']` is a `text[]` from
+            // the moment it is written, and `text[]` does not quietly become
+            // `jsonb[]` or `inet[]` — it is rejected, which is three of the
+            // nine real schemas. Where the element type has no unambiguous
+            // name to write, the array goes out uncast as before rather than
+            // naming a type that might belong to another schema.
             let Literal(inner) = render(rng, of, row, bounds, unique);
-            Literal(format!("ARRAY[{inner}]"))
+            match of.sql_name() {
+                Some(name) => Literal(format!("ARRAY[{inner}]::{name}[]")),
+                None => Literal(format!("ARRAY[{inner}]")),
+            }
         }
 
         // Unreachable: a table carrying one of these was refused. Rendering
@@ -336,6 +345,7 @@ mod tests {
             type_,
             nullable: true,
             has_default: false,
+            default_is_sequence: false,
             is_generated: false,
             position: 1,
         }
@@ -471,6 +481,7 @@ mod tests {
     fn an_enum_only_ever_produces_one_of_its_labels() {
         let c = column("state", ColumnType::Enum {
             name: "status".into(),
+            qualified: None,
             labels: vec!["pending".into(), "shipped".into()],
         });
         for row in 0..50 {
