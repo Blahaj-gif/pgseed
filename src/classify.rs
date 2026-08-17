@@ -32,6 +32,10 @@ pub enum Refusal {
     /// A required column points at a table that is itself refused, so any row
     /// here would reference nothing.
     DependsOnRefused { table: TableId, constraint: String },
+    /// A required column points at a table that was never read — in a schema
+    /// that was not asked for, or of a kind introspection skips. Whether it
+    /// holds any rows to point at is not knowable from here.
+    DependsOnUnread { table: TableId, constraint: String },
 }
 
 impl Refusal {
@@ -49,6 +53,10 @@ impl Refusal {
             Refusal::UnbreakableCycle { reason } => reason.clone(),
             Refusal::DependsOnRefused { table, constraint } => format!(
                 "foreign key \"{constraint}\" requires {table}, which is itself refused"
+            ),
+            Refusal::DependsOnUnread { table, constraint } => format!(
+                "foreign key \"{constraint}\" requires {table}, which was not read — \
+                 pass --schema for it, or this cannot show a row it names exists"
             ),
         }
     }
@@ -180,17 +188,28 @@ pub fn classify(schema: &Schema, order: &Order) -> Verdict {
                 if fk.is_optional(table) || fk.references == *id {
                     continue;
                 }
-                if refused_ids.contains(&fk.references) {
-                    refusals.push((
-                        id.clone(),
-                        vec![Refusal::DependsOnRefused {
-                            table: fk.references.clone(),
-                            constraint: fk.name.clone(),
-                        }],
-                    ));
-                    added = true;
-                    break;
-                }
+                // A parent that was never read is not a free pass either. It
+                // may be in a schema nobody asked for, or a partitioned table
+                // introspection skips; either way there is no pool to draw
+                // from, and the emitter's only remaining move is to write NULL
+                // into a column that forbids it. That was 33 of the 43
+                // statements the real-schema corpus had rejected.
+                let reason = if refused_ids.contains(&fk.references) {
+                    Refusal::DependsOnRefused {
+                        table: fk.references.clone(),
+                        constraint: fk.name.clone(),
+                    }
+                } else if !schema.tables.contains_key(&fk.references) {
+                    Refusal::DependsOnUnread {
+                        table: fk.references.clone(),
+                        constraint: fk.name.clone(),
+                    }
+                } else {
+                    continue;
+                };
+                refusals.push((id.clone(), vec![reason]));
+                added = true;
+                break;
             }
         }
         if !added {
@@ -216,9 +235,11 @@ pub fn classify(schema: &Schema, order: &Order) -> Verdict {
     for cycle in &order.cycles {
         match &cycle.strategy {
             crate::graph::CycleStrategy::Deferred { .. } => deferred_constraints = true,
-            crate::graph::CycleStrategy::NullThenUpdate { table, constraint } => {
-                if !refused_ids.contains(table) {
-                    deferred_repairs.push((table.clone(), constraint.clone()));
+            crate::graph::CycleStrategy::NullThenUpdate { broken } => {
+                for (table, constraint) in broken {
+                    if !refused_ids.contains(table) {
+                        deferred_repairs.push((table.clone(), constraint.clone()));
+                    }
                 }
             }
             crate::graph::CycleStrategy::Impossible { .. } => {}
@@ -396,6 +417,63 @@ mod tests {
         let v = verdict_for(&schema_of(vec![orders, users]));
         let names: Vec<&str> = v.fillable.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["users", "orders"]);
+    }
+
+    #[test]
+    fn a_required_key_to_a_table_never_read_refuses_rather_than_writing_null() {
+        // The parent is in a schema nobody asked for, or is a partitioned
+        // table introspection skips. Either way there is no pool, and the old
+        // answer — write NULL and hope — was 28 of the corpus's rejections.
+        let mut orders = table("orders", vec![col("user_id", int(), false)]);
+        orders.foreign_keys.push(ForeignKey {
+            name: "o_u".into(),
+            columns: vec!["user_id".into()],
+            references: TableId::new("other", "users"),
+            referenced_columns: vec!["id".into()],
+            deferrable: false,
+        });
+        let v = verdict_for(&schema_of(vec![orders]));
+        assert!(v.fillable.is_empty());
+        let text = v.refused[0].1[0].explain();
+        assert!(text.contains("other.users"), "{text}");
+        assert!(text.contains("not read"), "{text}");
+    }
+
+    #[test]
+    fn a_nullable_key_to_a_table_never_read_is_still_fine() {
+        // Nothing is lost: the row is written without the reference. Refusing
+        // here would drop a great many ordinary tables for no gain.
+        let mut orders = table("orders", vec![col("user_id", int(), true)]);
+        orders.foreign_keys.push(ForeignKey {
+            name: "o_u".into(),
+            columns: vec!["user_id".into()],
+            references: TableId::new("other", "users"),
+            referenced_columns: vec!["id".into()],
+            deferrable: false,
+        });
+        assert_eq!(verdict_for(&schema_of(vec![orders])).fillable.len(), 1);
+    }
+
+    #[test]
+    fn a_check_that_forbids_null_makes_a_nullable_key_required() {
+        // GitLab adds not-nulls as CHECK constraints to avoid rewriting the
+        // table. The column is nullable in the catalogue and not null in fact,
+        // and reading only the catalogue produced five CHECK violations.
+        let mut orders = table("orders", vec![col("user_id", int(), true)]);
+        orders.foreign_keys.push(ForeignKey {
+            name: "o_u".into(),
+            columns: vec!["user_id".into()],
+            references: TableId::new("other", "users"),
+            referenced_columns: vec!["id".into()],
+            deferrable: false,
+        });
+        orders.checks.push(CheckConstraint {
+            name: "check_abc123".into(),
+            definition: "CHECK ((user_id IS NOT NULL))".into(),
+        });
+        let v = verdict_for(&schema_of(vec![orders]));
+        assert!(v.fillable.is_empty(), "a CHECK said this column is not null");
+        assert!(v.refused[0].1[0].explain().contains("not read"));
     }
 
     #[test]

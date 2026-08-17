@@ -139,7 +139,7 @@ fn measure(name: &str, path: &Path) {
     let verdict = pgsow::classify::classify(&schema, &order);
 
     // Why each refusal happened, which is more useful than the total.
-    let (mut checks, mut types, mut cycles, mut inherited) = (0, 0, 0, 0);
+    let (mut checks, mut types, mut cycles, mut inherited, mut unread) = (0, 0, 0, 0, 0);
     for (_, reasons) in &verdict.refused {
         for reason in reasons {
             match reason {
@@ -147,6 +147,7 @@ fn measure(name: &str, path: &Path) {
                 pgsow::classify::Refusal::UnsupportedType { .. } => types += 1,
                 pgsow::classify::Refusal::UnbreakableCycle { .. } => cycles += 1,
                 pgsow::classify::Refusal::DependsOnRefused { .. } => inherited += 1,
+                pgsow::classify::Refusal::DependsOnUnread { .. } => unread += 1,
             }
         }
     }
@@ -155,7 +156,7 @@ fn measure(name: &str, path: &Path) {
         "\n  {name}\n    {applied} applied, {skipped} skipped, {lost_constraints} of them constraints a live table has now lost\n    \
          {} tables · {} fillable · {} refused · REACH {:.0}%\n    \
          refused because: {checks} CHECK · {types} unsupported type · \
-         {cycles} unbreakable cycle · {inherited} depends on a refused table",
+         {cycles} unbreakable cycle · {inherited} depends on a refused table ·          {unread} depends on a table never read",
         schema.len(),
         verdict.fillable.len(),
         verdict.refused.len(),

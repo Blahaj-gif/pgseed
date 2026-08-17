@@ -28,9 +28,14 @@ use crate::schema::{Schema, TableId};
 /// How a cycle gets broken, or why it cannot be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CycleStrategy {
-    /// Insert without this key, then UPDATE it. Names the table and the
-    /// constraint whose columns are left null on the first pass.
-    NullThenUpdate { table: TableId, constraint: String },
+    /// Insert without these keys, then UPDATE them. Names every (table,
+    /// constraint) whose columns are left null on the first pass.
+    ///
+    /// A list rather than a single edge, because removing one edge from a
+    /// strongly-connected group does not generally make it acyclic. GitLab's
+    /// vulnerability tables are a group of several interlocking loops, and
+    /// breaking one of them still left a required key pointing forwards.
+    NullThenUpdate { broken: Vec<(TableId, String)> },
     /// Every constraint in the cycle can be deferred, so one transaction with
     /// `SET CONSTRAINTS ALL DEFERRED` is enough.
     Deferred { constraints: Vec<String> },
@@ -149,16 +154,25 @@ pub fn order(schema: &Schema) -> Order {
         let blocked = matches!(strategy, CycleStrategy::Impossible { .. });
         cycles.push(Cycle { tables: group.clone(), strategy });
 
-        // Either way the group is now placed: a broken cycle inserts in name
-        // order and repairs itself afterwards, and an unbreakable one is
-        // recorded so that whatever depends on it is refused too rather than
+        // A broken cycle is inserted in the order that remains once the
+        // nulled keys are set aside — not in name order, which is right only
+        // by luck. With `b.x` nulled, `b` no longer waits for `a`, but `a`
+        // still waits for `b`, and the alphabet has no opinion about that.
+        // A deferred cycle genuinely has no required order, and an unbreakable
+        // one is recorded so whatever depends on it is refused rather than
         // silently dropped.
-        for id in group {
-            pending.remove(&id);
-            done.insert(id.clone());
-            if !blocked {
-                sorted.push(id);
+        let placement = match cycles.last().map(|c| &c.strategy) {
+            Some(CycleStrategy::NullThenUpdate { broken }) => {
+                sort_group(schema, &group, broken).unwrap_or_else(|| group.clone())
             }
+            _ => group.clone(),
+        };
+        for id in &group {
+            pending.remove(id);
+            done.insert(id.clone());
+        }
+        if !blocked {
+            sorted.extend(placement);
         }
     }
 
@@ -197,21 +211,98 @@ fn smallest_cycle(pending: &BTreeMap<TableId, BTreeSet<TableId>>) -> Vec<TableId
     }
 }
 
-/// Decide how — or whether — a cycle can be broken.
-fn strategy_for(schema: &Schema, group: &[TableId]) -> CycleStrategy {
-    // Preferred: some key inside the cycle is nullable, so the row can be
-    // inserted without it and updated afterwards.
+/// Sort a cycle's tables into an insert order, given the keys being nulled.
+///
+/// `None` means the group is still cyclic with those keys removed, which is
+/// the question the caller is really asking — there is no order, so more has
+/// to be broken or another strategy found.
+fn sort_group(
+    schema: &Schema,
+    group: &[TableId],
+    broken: &[(TableId, String)],
+) -> Option<Vec<TableId>> {
+    let mut pending: BTreeMap<TableId, BTreeSet<TableId>> = BTreeMap::new();
     for id in group {
         let Some(table) = schema.get(id) else { continue };
+        let mut deps = BTreeSet::new();
         for fk in &table.foreign_keys {
-            let points_into_cycle = group.contains(&fk.references);
-            if points_into_cycle && fk.is_optional(table) {
-                return CycleStrategy::NullThenUpdate {
-                    table: id.clone(),
-                    constraint: fk.name.clone(),
-                };
+            // A self-reference counts here, unlike in the outer graph. There
+            // it is excluded so the table is not blocked on itself forever;
+            // here the question is whether a row can be inserted at all, and
+            // one that must point at a row of its own table cannot — not
+            // until the key has been left null and filled in afterwards.
+            let removed = broken.iter().any(|(t, c)| t == id && *c == fk.name);
+            if removed || !group.contains(&fk.references) {
+                continue;
             }
+            deps.insert(fk.references.clone());
         }
+        pending.insert(id.clone(), deps);
+    }
+
+    let mut done: BTreeSet<TableId> = BTreeSet::new();
+    let mut sorted: Vec<TableId> = Vec::new();
+    while !pending.is_empty() {
+        let ready: Vec<TableId> = pending
+            .iter()
+            .filter(|(_, deps)| deps.iter().all(|d| done.contains(d)))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if ready.is_empty() {
+            return None;
+        }
+        for id in ready {
+            pending.remove(&id);
+            done.insert(id.clone());
+            sorted.push(id);
+        }
+    }
+    Some(sorted)
+}
+
+/// The next nullable key inside the cycle that has not been broken already.
+///
+/// Deterministic: tables in the order the group holds them, keys in declared
+/// order. An unstable choice here means a different insert order per run, and
+/// reproducibility is a property this tool sells.
+fn next_optional_edge(
+    schema: &Schema,
+    group: &[TableId],
+    broken: &[(TableId, String)],
+) -> Option<(TableId, String)> {
+    for id in group {
+        let table = schema.get(id)?;
+        for fk in &table.foreign_keys {
+            if !group.contains(&fk.references) || !fk.is_optional(table) {
+                continue;
+            }
+            if broken.iter().any(|(t, c)| t == id && *c == fk.name) {
+                continue;
+            }
+            return Some((id.clone(), fk.name.clone()));
+        }
+    }
+    None
+}
+
+/// Decide how — or whether — a cycle can be broken.
+fn strategy_for(schema: &Schema, group: &[TableId]) -> CycleStrategy {
+    // Preferred: enough keys inside the cycle are nullable that removing them
+    // leaves something that can actually be sorted. One is usually enough and
+    // used to be assumed sufficient, which was wrong — a strongly-connected
+    // group can hold several interlocking loops, and the leftover edges then
+    // point forwards at rows that have not been written yet.
+    let mut broken: Vec<(TableId, String)> = Vec::new();
+    while sort_group(schema, group, &broken).is_none() {
+        match next_optional_edge(schema, group, &broken) {
+            Some(edge) => broken.push(edge),
+            // Out of nullable keys with the group still cyclic. Fall through
+            // to deferring, which does not care about order at all.
+            None => break,
+        }
+    }
+    if !broken.is_empty() && sort_group(schema, group, &broken).is_some() {
+        return CycleStrategy::NullThenUpdate { broken };
     }
 
     // Next best: every constraint in the cycle can be deferred to commit.
@@ -365,14 +456,65 @@ mod tests {
         let o = order(&s);
         assert_eq!(o.cycles.len(), 1);
         match &o.cycles[0].strategy {
-            CycleStrategy::NullThenUpdate { table, constraint } => {
-                assert_eq!(table.name, "users");
-                assert_eq!(constraint, "u_org");
+            CycleStrategy::NullThenUpdate { broken } => {
+                assert_eq!(broken.len(), 1, "one edge is enough for a two-cycle");
+                assert_eq!(broken[0].0.name, "users");
+                assert_eq!(broken[0].1, "u_org");
             }
             other => panic!("expected a nullable break, got {other:?}"),
         }
         assert_eq!(o.tables.len(), 2);
         assert!(o.blocked().is_empty());
+
+        // And in the order that remains once `users.default_org_id` is set
+        // aside: orgs still requires users, so users goes first.
+        let names: Vec<&str> = o.tables.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["users", "orgs"]);
+    }
+
+    #[test]
+    fn a_group_of_two_loops_breaks_both_and_sorts_what_is_left() {
+        // The shape that was wrong on GitLab: `a` and `b` reference each other
+        // twice over. Breaking one nullable key leaves the other loop intact,
+        // and placing the group alphabetically then writes `a` before `b`
+        // while `a` still requires it.
+        let s = schema_of(vec![
+            table("a", vec![col("b1", true), col("b2", true)],
+                  vec![fk("a_b1", "b1", "b", false), fk("a_b2", "b2", "b", false)]),
+            table("b", vec![col("a1", true), col("a2", true)],
+                  vec![fk("b_a1", "a1", "a", false), fk("b_a2", "a2", "a", false)]),
+        ]);
+        let o = order(&s);
+        match &o.cycles[0].strategy {
+            CycleStrategy::NullThenUpdate { broken } => {
+                assert_eq!(broken.len(), 2, "one break leaves the group cyclic");
+            }
+            other => panic!("expected a nullable break, got {other:?}"),
+        }
+        assert_eq!(o.tables.len(), 2);
+    }
+
+    #[test]
+    fn a_key_a_check_says_is_not_null_cannot_be_used_to_break_a_cycle() {
+        // Nulling it would violate the CHECK on the very first insert.
+        use crate::schema::CheckConstraint;
+        let mut users = table("users", vec![col("default_org_id", true)],
+                              vec![fk("u_org", "default_org_id", "orgs", false)]);
+        users.checks.push(CheckConstraint {
+            name: "check_org".into(),
+            definition: "CHECK ((default_org_id IS NOT NULL))".into(),
+        });
+        let s = schema_of(vec![
+            users,
+            table("orgs", vec![col("owner_id", false)],
+                  vec![fk("o_owner", "owner_id", "users", false)]),
+        ]);
+        let o = order(&s);
+        assert!(
+            matches!(o.cycles[0].strategy, CycleStrategy::Impossible { .. }),
+            "got {:?}", o.cycles[0].strategy
+        );
+        assert_eq!(o.blocked().len(), 2);
     }
 
     #[test]

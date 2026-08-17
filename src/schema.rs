@@ -154,9 +154,15 @@ pub struct ForeignKey {
 impl ForeignKey {
     /// Whether this key can hold NULL, which is the cheapest way out of a
     /// cycle: insert the row without the reference, then fill it in.
+    ///
+    /// Nullable in the catalogue is not the end of the question. A column
+    /// carrying `CHECK (col IS NOT NULL)` is not nullable in any sense that
+    /// matters, and a schema that adds its not-nulls that way — GitLab does,
+    /// because it avoids rewriting a large table — would otherwise have every
+    /// one of them read as an invitation to write NULL.
     pub fn is_optional(&self, table: &Table) -> bool {
         self.columns.iter().all(|c| {
-            table.column(c).map(|col| col.nullable).unwrap_or(false)
+            table.column(c).is_some_and(|col| col.nullable) && !table.check_forbids_null(c)
         })
     }
 }
@@ -190,6 +196,19 @@ pub struct Table {
 impl Table {
     pub fn column(&self, name: &str) -> Option<&Column> {
         self.columns.iter().find(|c| c.name == name)
+    }
+
+    /// Whether a CHECK on this table says the column may not be null.
+    ///
+    /// `ALTER TABLE ... SET NOT NULL` takes an exclusive lock and rewrites, so
+    /// large schemas add the same rule as a CHECK instead. It is the same rule.
+    pub fn check_forbids_null(&self, column: &str) -> bool {
+        self.checks.iter().any(|check| {
+            matches!(
+                crate::checks::interpret(&check.definition),
+                crate::checks::Meaning::NotNull { column: c } if c == column
+            )
+        })
     }
 
     /// The columns a row must actually supply: not generated, and either
