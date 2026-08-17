@@ -84,10 +84,46 @@ fn a_check_constraint_arrives_with_its_expression_and_refuses_the_table() {
         pgsow::schema::ColumnType::Numeric { precision: Some(10), scale: Some(2) }
     );
 
+    // `total > 0` is a recognised lower bound, so this table is fillable —
+    // the point of the test is that the *expression* survived introspection,
+    // which is why this reads pg_catalog and not information_schema.
     let order = pgsow::graph::order(&schema);
     let verdict = pgsow::classify::classify(&schema, &order);
+    assert_eq!(verdict.fillable.len(), 1);
+    assert_eq!(
+        pgsow::checks::interpret(&table.checks[0].definition),
+        pgsow::checks::Meaning::LowerBound { column: "total".into(), min: 0, inclusive: false }
+    );
+}
+
+#[test]
+fn a_check_outside_the_closed_set_refuses_its_table_against_a_real_database() {
+    // The refusal path, on a constraint Postgres accepts and this will not
+    // pretend to satisfy. `num_nonnulls` requires exactly one of two columns
+    // to be set, which is a real rule with no closed form here.
+    let db = Db::start();
+    db.apply(
+        "CREATE TABLE targets (
+             id       int PRIMARY KEY,
+             user_id  int,
+             group_id int,
+             CONSTRAINT exactly_one_owner CHECK (num_nonnulls(user_id, group_id) = 1)
+         );",
+    );
+
+    let mut client = db.client();
+    let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = pgsow::graph::order(&schema);
+    let verdict = pgsow::classify::classify(&schema, &order);
+
     assert!(verdict.fillable.is_empty());
-    assert!(verdict.refused[0].1[0].explain().contains("invoices_total_positive"));
+    assert!(verdict.refused[0].1[0].explain().contains("exactly_one_owner"));
+
+    // And the refusal is not timidity: writing both columns, which is what a
+    // generator filling every column would do, is rejected by Postgres.
+    let both = db.client().batch_execute(
+        "INSERT INTO targets (id, user_id, group_id) VALUES (1, 1, 1);");
+    assert!(both.is_err(), "the database should have rejected two owners");
 }
 
 #[test]
