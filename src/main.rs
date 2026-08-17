@@ -4,26 +4,14 @@
 //! works out the insert order, and decides for every table whether it could be
 //! filled or must be refused. It generates nothing yet, deliberately.
 //!
-//! That is not a half-finished version of the tool; it is the measurement that
-//! decides whether the rest is worth writing. The number to look at is
-//! `reach` — the share of real tables that can be ordered and classified
-//! without ambiguity. If that is poor on real schemas, no amount of clever
-//! value generation rescues it, and better to know on day one.
-
-// The schema model records everything introspection can see, and this
-// milestone only *classifies*. Primary keys, referenced columns and column
-// positions are read and not yet consumed — they are what the generation
-// milestone needs, and dropping them now would mean querying for them again
-// later. Warned about rather than deleted, and this allow comes off with the
-// first generator.
-#![allow(dead_code)]
-
-mod classify;
-mod graph;
-mod introspect;
-mod schema;
+//! That is not a half-finished tool; it is the measurement that decides
+//! whether the rest is worth writing. The number to look at is *reach* — the
+//! share of real tables that can be ordered and classified without ambiguity.
+//! If that is poor on real schemas, no amount of clever value generation
+//! rescues it, and better to know on day one than in month three.
 
 use clap::Parser;
+use pgsow::{classify, graph, introspect};
 
 #[derive(Parser)]
 #[command(name = "pgsow", version, about =
@@ -85,8 +73,8 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    // 0 everything fillable · 1 something refused · 2 could not read.
-    // So it composes in a script without anybody parsing this prose.
+    // 0 everything fillable · 1 something refused · 2 could not read, so this
+    // composes in a script without anybody parsing the prose above.
     if verdict.refused.is_empty() {
         std::process::ExitCode::SUCCESS
     } else {

@@ -217,7 +217,11 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
             &typname,
             &(typtype as u8 as char).to_string(),
             row.get::<_, i32>("atttypmod"),
-            row.get::<_, i32>("attndims"),
+            // `attndims` is int2 in the catalog, not int4. Reading it as the
+            // wrong width is a deserialisation error rather than a silent
+            // misread, which is the good kind of wrong — and exactly the kind
+            // only a real database finds.
+            row.get::<_, i16>("attndims") as i32,
             base_typname.as_deref().zip(base_typtype.as_deref()),
             row.get::<_, bool>("domain_checked"),
             element_typname.as_deref().zip(element_typtype.as_deref()),

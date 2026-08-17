@@ -26,7 +26,7 @@ rand_chacha = "0.3"
 # A real Postgres, downloaded and run per test, with no Docker and no install.
 # The entire correctness argument of this tool is that the database adjudicates,
 # so the tests need a database rather than a model of one.
-postgresql_embedded = "0.19"
+postgresql_embedded = { version = "0.19", features = ["blocking", "bundled"] }
 
 [features]
 # Integration tests download a Postgres on first run, so they are opt-in:
