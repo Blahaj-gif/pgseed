@@ -182,6 +182,11 @@ pub fn map_type(
         "json" => ColumnType::Json { binary: false },
         "jsonb" => ColumnType::Json { binary: true },
         "bytea" => ColumnType::Bytea,
+        "inet" => ColumnType::Network { kind: crate::schema::NetworkKind::Inet },
+        "cidr" => ColumnType::Network { kind: crate::schema::NetworkKind::Cidr },
+        "macaddr" | "macaddr8" => {
+            ColumnType::Network { kind: crate::schema::NetworkKind::MacAddr }
+        }
         other => ColumnType::Unsupported { name: other.to_string() },
     }
 }

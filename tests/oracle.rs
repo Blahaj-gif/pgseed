@@ -200,3 +200,23 @@ fn the_same_seed_produces_the_same_database_twice() {
     let (_b, second) = seed(ddl, 20);
     assert_eq!(first, second, "the same seed produced different SQL");
 }
+
+#[test]
+fn network_types_and_a_lowercase_constraint_round_trip() {
+    // PowerDNS in miniature: the schema that scored 29% because of one `inet`
+    // column and four copies of a lowercase rule. Postgres is strict about
+    // `cidr` in particular — the host bits must be zero — so this fails loudly
+    // if the generator is careless.
+    let (db, _) = seed(
+        "CREATE TABLE hosts (
+             id      int PRIMARY KEY,
+             name    varchar(255) NOT NULL,
+             ip      inet NOT NULL,
+             subnet  cidr NOT NULL,
+             mac     macaddr NOT NULL,
+             CONSTRAINT c_lowercase_name CHECK (((name)::text = lower((name)::text)))
+         );",
+        20,
+    );
+    assert_eq!(count(&db, "hosts"), 20);
+}

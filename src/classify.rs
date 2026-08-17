@@ -98,7 +98,8 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
             Meaning::LengthLimit { column, .. }
             | Meaning::NotNull { column }
             | Meaning::ByteLength { column, .. }
-            | Meaning::LowerBound { column, .. } => table.column(&column).is_some(),
+            | Meaning::LowerBound { column, .. }
+            | Meaning::Lowercase { column } => table.column(&column).is_some(),
             // An obligation rather than a permission: satisfied by writing
             // NULL, and therefore only satisfiable if the column may BE null.
             // A NOT NULL column carrying `(col IS NULL) OR ...` genuinely

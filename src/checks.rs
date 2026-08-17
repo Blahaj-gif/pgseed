@@ -55,6 +55,10 @@ pub enum Meaning {
     MustBeNull { column: String },
     /// `col > N` or `col >= N` against a plain integer.
     LowerBound { column: String, min: i64, inclusive: bool },
+    /// `col = lower(col)`, however casted. PowerDNS puts this on four of its
+    /// seven tables and it refused the entire schema — for a rule satisfied by
+    /// generating a lowercase string, which everything here already does.
+    Lowercase { column: String },
     /// Anything at all that is not exactly one of the above.
     Unknown,
 }
@@ -139,6 +143,26 @@ pub fn interpret(definition: &str) -> Meaning {
                     if let Some(column) = column {
                         return Meaning::MustBeNull { column };
                     }
+                }
+            }
+        }
+    }
+
+    // `col = lower(col)`, with the casts Postgres prints. Both sides must name
+    // the same column, or this is a comparison between two things and not a
+    // statement about one.
+    if let Some((left, right)) = expression.split_once('=') {
+        if !left.ends_with('<') && !left.ends_with('>') && !left.ends_with('!') {
+            let subject = column_name(unwrap_parens(left).split("::").next().unwrap_or(""));
+            let called = unwrap_parens(right)
+                .strip_prefix("lower")
+                .map(str::trim)
+                .and_then(|s| s.strip_prefix('('))
+                .and_then(|s| s.strip_suffix(')'))
+                .map(|inner| column_name(inner.split("::").next().unwrap_or("")));
+            if let (Some(subject), Some(Some(inner))) = (subject, called) {
+                if subject == inner {
+                    return Meaning::Lowercase { column: subject };
                 }
             }
         }
@@ -364,6 +388,22 @@ mod tests {
         assert_eq!(interpret("CHECK ((created_at > now()))"), Meaning::Unknown);
         assert_eq!(interpret("CHECK ((total > (0)::numeric))"), Meaning::LowerBound {
             column: "total".into(), min: 0, inclusive: false });
+    }
+
+    #[test]
+    fn a_lowercase_constraint_is_recognised() {
+        // PowerDNS, on four of its seven tables, in the form Postgres prints.
+        assert_eq!(
+            interpret("CHECK (((name)::text = lower((name)::text)))"),
+            Meaning::Lowercase { column: "name".into() }
+        );
+    }
+
+    #[test]
+    fn lowercase_of_a_different_column_is_not_a_statement_about_this_one() {
+        // `a = lower(b)` relates two columns. Satisfying it needs both, which
+        // is reasoning this does not do.
+        assert_eq!(interpret("CHECK ((a = lower(b)))"), Meaning::Unknown);
     }
 
     #[test]

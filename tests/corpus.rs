@@ -58,6 +58,28 @@ fn measure(name: &str, path: &Path) {
 
     let db = Db::start();
     let mut client = db.client();
+
+    // A dump may put its tables in a schema it assumes already exists —
+    // Hasura's lives in `hdb_catalog` and creates it elsewhere. Without this
+    // every statement fails and the schema scores zero for a reason that has
+    // nothing to do with the tool.
+    let mut schemas: std::collections::BTreeSet<String> = ["public".to_string()].into();
+    for line in sql.lines() {
+        for marker in ["CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "] {
+            if let Some(rest) = line.trim_start().strip_prefix(marker) {
+                if let Some((qualifier, _)) = rest.split_once('.') {
+                    let name = qualifier.trim().trim_matches('"');
+                    if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        schemas.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    for name in &schemas {
+        let _ = client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{name}\";"));
+    }
+    let schemas: Vec<String> = schemas.into_iter().collect();
     let (mut applied, mut skipped) = (0usize, 0usize);
     let mut lost_constraints = 0usize;
 
@@ -111,7 +133,7 @@ fn measure(name: &str, path: &Path) {
         }
     }
 
-    let schema = pgsow::introspect::read(&mut client, &["public".to_string()])
+    let schema = pgsow::introspect::read(&mut client, &schemas)
         .expect("introspection failed on a real schema");
     let order = pgsow::graph::order(&schema);
     let verdict = pgsow::classify::classify(&schema, &order);
@@ -166,7 +188,8 @@ fn measure(name: &str, path: &Path) {
 #[test]
 fn reach_against_real_schemas() {
     println!("\nreach on schemas this project did not write:");
-    for name in ["synapse", "gitlab"] {
+    for name in ["powerdns", "hasura", "kong", "harbor", "temporal",
+                 "postgrest", "synapse", "discourse", "gitlab"] {
         measure(name, &Path::new("tests/corpus").join(format!("{name}.sql")));
     }
 }

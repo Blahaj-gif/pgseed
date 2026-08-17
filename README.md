@@ -9,15 +9,34 @@ pgsow --dsn postgres://localhost/mydb
 
 No codegen step. No generated client. No API key. No runtime — one binary.
 
-## Status: first milestone
+## Reach, on nine schemas nobody here wrote
 
-It **introspects and classifies**. It reads the schema, works out the insert
-order, and decides for every table whether it could be filled or must be
-refused. **It does not generate values yet**, and that is deliberate.
+| schema | tables | fillable | reach |
+|---|---:|---:|---:|
+| PowerDNS | 7 | 7 | 100% |
+| Hasura | 2 | 1 | 50% |
+| Kong | 9 | 8 | 89% |
+| Harbor | 21 | 21 | 100% |
+| Temporal | 37 | 36 | 97% |
+| PostgREST *(test fixtures — deliberately awkward)* | 73 | 72 | 99% |
+| Synapse | 134 | 129 | 96% |
+| Discourse | 351 | 349 | 99% |
+| GitLab | 956 | 706 | 74% |
+| **total** | **1,590** | **1,329** | **84%** |
 
-The number that decides whether the rest is worth writing is *what fraction of
-real tables can be ordered and classified without ambiguity*. That is
-measurable before a single value is invented, so it is being measured first.
+Fetched with `python tests/corpus/fetch.py`; sources and licences in
+`tests/corpus/sources.json`. The corpus is deliberately not written here — a
+hand-made one would only contain the constructs its author remembered to
+handle, which measures agreement rather than accuracy.
+
+## Status
+
+It introspects, classifies, and **generates**. Point it at a database and it
+writes SQL; `--plan` reports what it would do and writes nothing.
+
+Every row it produces is checked by the only authority that matters: a test
+generates for each corpus schema, applies the result to a real Postgres, and
+fails if a single row is rejected.
 
 ```
 pgsow: 14 tables, 12 fillable, 2 refused (86% reach)

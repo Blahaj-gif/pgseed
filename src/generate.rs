@@ -31,6 +31,11 @@ pub struct Bounds {
     pub exact_bytes: Option<i32>,
     pub min: Option<i64>,
     pub must_be_null: bool,
+    /// Every generated word is lowercase already, so this changes nothing
+    /// today. It is recorded anyway: relying on a coincidence in a word list
+    /// is not the same as honouring a constraint, and the day somebody adds
+    /// "Zulu" to that list is the day the coincidence ends.
+    pub lowercase: bool,
 }
 
 /// Gather, per column, everything the table's CHECK constraints promised.
@@ -57,6 +62,9 @@ pub fn bounds_for(table: &Table) -> BTreeMap<String, Bounds> {
             }
             Meaning::MustBeNull { column } => {
                 out.entry(column).or_default().must_be_null = true;
+            }
+            Meaning::Lowercase { column } => {
+                out.entry(column).or_default().lowercase = true;
             }
             Meaning::NotNull { .. } | Meaning::Unknown => {}
         }
@@ -211,6 +219,9 @@ fn render(
                     text = text.chars().take(limit).collect();
                 }
             }
+            if bounds.lowercase {
+                text = text.to_lowercase();
+            }
             Literal::text(&text)
         }
 
@@ -262,6 +273,22 @@ fn render(
                 hex.push_str(&format!("{:02x}", rng.gen::<u8>()));
             }
             Literal(format!("'\\x{hex}'::bytea"))
+        }
+
+        ColumnType::Network { kind } => {
+            use crate::schema::NetworkKind;
+            Literal::text(&match kind {
+                NetworkKind::Inet => format!(
+                    "10.{}.{}.{}", rng.gen_range(0..256), rng.gen_range(0..256),
+                    rng.gen_range(1..255)),
+                // A cidr must have zeroes in the host part or Postgres rejects
+                // it outright, which /24 on a .0 address guarantees.
+                NetworkKind::Cidr => format!("10.{}.{}.0/24",
+                    rng.gen_range(0..256), rng.gen_range(0..256)),
+                NetworkKind::MacAddr => format!(
+                    "08:00:2b:{:02x}:{:02x}:{:02x}",
+                    rng.gen::<u8>(), rng.gen::<u8>(), rng.gen::<u8>()),
+            })
         }
 
         ColumnType::Enum { labels, .. } => {

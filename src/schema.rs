@@ -75,6 +75,9 @@ pub enum ColumnType {
     Interval,
     Json { binary: bool },
     Bytea,
+    /// `inet`, `cidr`, `macaddr`. Ordinary Postgres, and their absence refused
+    /// a DNS server's entire schema for one column.
+    Network { kind: NetworkKind },
     /// A user-defined enum, with its labels in declaration order.
     Enum { name: String, labels: Vec<String> },
     /// A domain wraps another type and may add constraints of its own. The
@@ -111,6 +114,13 @@ impl ColumnType {
             other => format!("{other:?}").to_lowercase(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkKind {
+    Inet,
+    Cidr,
+    MacAddr,
 }
 
 #[derive(Debug, Clone)]
