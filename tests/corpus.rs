@@ -68,7 +68,7 @@ fn statements(sql: &str) -> Vec<String> {
     out
 }
 
-fn measure(name: &str, path: &Path) {
+fn measure(name: &str, path: &Path, max_lost: usize) {
     let Ok(sql) = std::fs::read_to_string(path) else {
         eprintln!("  {name}: not fetched, skipping");
         return;
@@ -133,17 +133,42 @@ fn measure(name: &str, path: &Path) {
                 // number that would flatter this measurement, so it is the one
                 // reported.
                 let head = statement.trim_start().to_uppercase();
-                if head.starts_with("ALTER TABLE") && head.contains("CONSTRAINT") {
+                // A failed unique index is exactly the same loss as a failed
+                // unique constraint, and until indexes were applied at all
+                // this could not have counted one. Leaving it out now would be
+                // the same hole one level down.
+                let lost = (head.starts_with("ALTER TABLE") && head.contains("CONSTRAINT"))
+                    || head.starts_with("CREATE UNIQUE INDEX");
+                if lost {
                     lost_constraints += 1;
-                    if lost_constraints <= 2 {
-                        let why = e.to_string();
-                        let why: String = why.chars().take(70).collect();
-                        eprintln!("      a table is under-constrained: {why}");
+                    if lost_constraints <= 3 {
+                        let why = e
+                            .as_db_error()
+                            .map_or_else(|| e.to_string(), |d| d.message().into());
+                        let why: String = why.chars().take(90).collect();
+                        let what: String =
+                            statement.trim_start().chars().take(60).collect();
+                        eprintln!("      under-constrained: {why}
+        {what}");
                     }
                 }
             }
         }
     }
+
+    // A ceiling rather than a printout. Every loss here has been read and has
+    // a cause: five are constraints on tables that failed to create, so they
+    // never enter the denominator and cost nothing, and GitLab's two are
+    // foreign keys the replay cannot build against a partitioned parent —
+    // those are real, and they make two child tables look less constrained
+    // than they are. Pinned so that a change which starts dropping more fails
+    // rather than quietly scoring better for it.
+    assert!(
+        lost_constraints <= max_lost,
+        "{name}: {lost_constraints} constraints lost, ceiling is {max_lost}. 
+         A schema in the database less constrained than the real one makes 
+         every number below it flattering rather than wrong, which is worse."
+    );
 
     let schema = pgsow::introspect::read(&mut client, &schemas)
         .expect("introspection failed on a real schema");
@@ -279,9 +304,19 @@ fn measure(name: &str, path: &Path) {
 #[test]
 fn reach_against_real_schemas() {
     println!("\nreach on schemas this project did not write:");
-    for name in ["powerdns", "hasura", "kong", "harbor", "temporal",
-                 "postgrest", "synapse", "discourse", "gitlab"] {
-        measure(name, &Path::new("tests/corpus").join(format!("{name}.sql")));
+    // Name, and the number of constraints its replay is known to lose.
+    for (name, max_lost) in [
+        ("powerdns", 0),
+        ("hasura", 2),
+        ("kong", 0),
+        ("harbor", 0),
+        ("temporal", 0),
+        ("postgrest", 1),
+        ("synapse", 0),
+        ("discourse", 3),
+        ("gitlab", 2),
+    ] {
+        measure(name, &Path::new("tests/corpus").join(format!("{name}.sql")), max_lost);
     }
 }
 
