@@ -109,7 +109,6 @@ impl RowCounts {
     /// did something else, which is the failure this whole tool is against.
     pub fn parse(arguments: &[String]) -> Result<RowCounts, String> {
         let mut out = RowCounts::default();
-        let mut saw_default = false;
         for argument in arguments {
             match argument.split_once('=') {
                 Some((pattern, count)) => {
@@ -125,11 +124,9 @@ impl RowCounts {
                     out.default = argument.trim().parse().map_err(|_| {
                         format!("--rows {argument}: expected a number or table=number")
                     })?;
-                    saw_default = true;
                 }
             }
         }
-        let _ = saw_default;
         Ok(out)
     }
 
