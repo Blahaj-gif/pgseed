@@ -126,6 +126,35 @@ const WORDS: [&str; 16] = [
     "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
 ];
 
+/// A row index as the shortest distinct string that can stand for it.
+///
+/// Base 36 rather than decimal because a `varchar(4)` column holds 1,679,616
+/// distinct values that way and only 10,000 in decimal, and the whole reason
+/// this exists is columns with very little room.
+pub fn base36(mut n: usize) -> String {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if n == 0 {
+        return "0".into();
+    }
+    let mut out = Vec::new();
+    while n > 0 {
+        out.push(DIGITS[n % 36]);
+        n /= 36;
+    }
+    out.reverse();
+    String::from_utf8(out).expect("ascii")
+}
+
+/// How many distinct strings `base36` can produce inside a length limit.
+///
+/// `None` where the limit is generous enough that no row count will reach it —
+/// 36^7 is 78 billion, and reporting a bound that large is the same as
+/// reporting none.
+pub fn text_domain(limit: i32) -> Option<usize> {
+    let limit = limit.max(0) as u32;
+    (limit <= 6).then(|| 36usize.saturating_pow(limit))
+}
+
 /// One value for one cell.
 ///
 /// `unique_hint` is mixed into anything that has to differ row to row — a
@@ -213,10 +242,25 @@ fn render(
                 (None, None) => None,
             };
             let word = WORDS[rng.gen_range(0..WORDS.len())];
-            let mut text = if unique {
-                format!("{word}-{row}")
-            } else {
-                word.to_string()
+            let mut text = match (unique, limit) {
+                // The row index has to survive the length limit, and appending
+                // it does not: `varchar(4)` cut "juliet-37" down to "juli" on
+                // every row, so a unique column produced the same four
+                // characters over and over. The index goes in first and the
+                // word fills whatever room is left over.
+                (true, Some(limit)) => {
+                    let limit = limit.max(1) as usize;
+                    let tag = base36(row);
+                    let room = limit.saturating_sub(tag.chars().count());
+                    let head: String = word.chars().take(room).collect();
+                    let tail: String = {
+                        let n = tag.chars().count();
+                        tag.chars().skip(n.saturating_sub(limit)).collect()
+                    };
+                    format!("{head}{tail}")
+                }
+                (true, None) => format!("{word}-{row}"),
+                (false, _) => word.to_string(),
             };
             if let Some(limit) = limit {
                 let limit = limit.max(1) as usize;

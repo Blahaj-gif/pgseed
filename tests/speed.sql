@@ -1,0 +1,14 @@
+CREATE TABLE users (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, email varchar(255) NOT NULL UNIQUE, name text, active boolean NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE orgs (id int PRIMARY KEY, title text NOT NULL, owner_id bigint REFERENCES users(id));
+CREATE TABLE products (id int PRIMARY KEY, sku varchar(64) NOT NULL UNIQUE, price numeric(10,2) NOT NULL);
+CREATE TABLE orders (id int PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id), org_id int REFERENCES orgs(id), total numeric(10,2) NOT NULL, placed date NOT NULL);
+CREATE TABLE order_items (id int PRIMARY KEY, order_id int NOT NULL REFERENCES orders(id), product_id int NOT NULL REFERENCES products(id), qty int NOT NULL);
+CREATE TABLE addresses (id int PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id), line1 text NOT NULL, country char(2) NOT NULL);
+CREATE TABLE payments (id int PRIMARY KEY, order_id int NOT NULL REFERENCES orders(id), amount numeric(10,2) NOT NULL, ref uuid NOT NULL);
+CREATE TABLE shipments (id int PRIMARY KEY, order_id int NOT NULL REFERENCES orders(id), address_id int NOT NULL REFERENCES addresses(id), sent timestamptz);
+CREATE TABLE reviews (id int PRIMARY KEY, product_id int NOT NULL REFERENCES products(id), user_id bigint NOT NULL REFERENCES users(id), stars smallint NOT NULL, body text);
+CREATE TABLE tags (id int PRIMARY KEY, label text NOT NULL UNIQUE);
+CREATE TABLE product_tags (product_id int NOT NULL REFERENCES products(id), tag_id int NOT NULL REFERENCES tags(id), PRIMARY KEY (product_id, tag_id));
+CREATE TABLE sessions (id uuid PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id), ip inet, started timestamptz NOT NULL);
+CREATE TABLE audit (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, actor bigint REFERENCES users(id), what text NOT NULL, meta jsonb);
+CREATE TABLE invoices (id int PRIMARY KEY, org_id int NOT NULL REFERENCES orgs(id), issued date NOT NULL, amount numeric(12,2) NOT NULL);

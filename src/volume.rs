@@ -29,10 +29,33 @@ pub fn domain_size(type_: &ColumnType) -> Option<usize> {
     match type_ {
         ColumnType::Boolean => Some(2),
         ColumnType::Enum { labels, .. } => Some(labels.len()),
+        // A narrow string is a small domain too. `varchar(2)` holds 1,296
+        // values the generator can produce, and asking it for more rows than
+        // that under a unique constraint is the same impossible question a
+        // boolean poses — just further along.
+        ColumnType::Text { max_length: Some(n) } => crate::generate::text_domain(*n),
         // A domain is its inner type plus constraints. Constraints only ever
         // narrow it, so the inner type's size stays an upper bound.
         ColumnType::Domain { inner, .. } => domain_size(inner),
         _ => None,
+    }
+}
+
+/// What one column of a table can hold, counting the CHECK constraints on it.
+///
+/// A `text` column under `CHECK (char_length(x) <= 4)` is exactly as narrow as
+/// a `varchar(4)`, and the generator already honours both. Only the type was
+/// being consulted, so the same limit written the other way was invisible.
+fn column_domain(table: &Table, name: &str) -> Option<usize> {
+    let column = table.column(name)?;
+    let by_type = domain_size(&column.type_);
+    let by_check = crate::generate::bounds_for(table)
+        .get(name)
+        .and_then(|b| b.max_length)
+        .and_then(crate::generate::text_domain);
+    match (by_type, by_check) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
@@ -93,7 +116,7 @@ fn key_capacity(
             counted.push(&fk.name);
             *written.get(&fk.references)?
         } else {
-            domain_size(&table.column(name)?.type_)?
+            column_domain(table, name)?
         };
         product = product.checked_mul(bound)?;
     }
@@ -134,12 +157,14 @@ pub fn varying_columns(table: &Table) -> std::collections::BTreeSet<String> {
             out.insert(key.columns[0].clone());
             continue;
         }
-        let chosen = key.columns.iter().find(|name| {
-            covering_key(table, name).is_none()
-                && table
-                    .column(name)
-                    .is_some_and(|c| domain_size(&c.type_).is_none())
-        });
+        // The widest column, not merely an unbounded one: given a boolean and
+        // a varchar(8), the varchar carries the tuple's distinctness much
+        // further. `None` means no bound worth counting, so it sorts highest.
+        let chosen = key
+            .columns
+            .iter()
+            .filter(|name| covering_key(table, name).is_none())
+            .max_by_key(|name| column_domain(table, name).unwrap_or(usize::MAX));
         if let Some(name) = chosen {
             out.insert(name.clone());
         }

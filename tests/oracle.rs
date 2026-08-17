@@ -470,3 +470,96 @@ fn an_exclusion_constraint_refuses_its_table_rather_than_guessing() {
     let text = reasons[0].explain();
     assert!(text.contains("EXCLUDE"), "the rule should be quoted back: {text}");
 }
+
+/// The speed gate, pre-registered: fourteen tables at fifty rows, under 2s.
+///
+/// Measured over generation only. Starting a Postgres and running the DDL is
+/// not what the gate was about, and folding it in would measure the harness.
+#[test]
+fn fourteen_tables_at_fifty_rows_generate_inside_the_budget() {
+    let ddl = std::fs::read_to_string("tests/speed.sql").expect("the fixture");
+    let db = Db::start();
+    db.apply(&ddl);
+
+    let mut client = db.client();
+    let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
+    assert_eq!(schema.len(), 14, "the gate is about fourteen tables");
+
+    let started = std::time::Instant::now();
+    let order = graph::order(&schema);
+    let verdict = classify::classify(&schema, &order);
+    let sql = emit::sql(&schema, &verdict, &emit::Options { seed: 1, rows: 50 });
+    let elapsed = started.elapsed();
+
+    println!("  14 tables x 50 rows: {:?} for {} bytes", elapsed, sql.len());
+    assert!(elapsed.as_secs_f64() < 2.0, "the gate is 2s, this took {elapsed:?}");
+
+    // And the output still has to be real, or the timing measured nothing.
+    db.client().batch_execute(&sql).expect("its own output did not run");
+    assert_eq!(count(&db, "order_items"), 50);
+}
+
+/// Determinism, now that a row count can depend on another table.
+///
+/// The per-cell stream was the answer to this: a value comes from
+/// hash(seed, table, column, row) rather than a running stream, so adding a
+/// table cannot shift values elsewhere. That was true when every table got a
+/// flat fifty. It needs re-asking now that `volume` lets one table's row count
+/// depend on its parents — the promise is worth only as much as its last test.
+#[test]
+fn adding_a_table_does_not_disturb_the_ones_already_there() {
+    let base = "CREATE TABLE users (id int PRIMARY KEY, email text NOT NULL UNIQUE);
+                CREATE TABLE orders (id int PRIMARY KEY, user_id int NOT NULL REFERENCES users(id));";
+
+    let render = |ddl: &str| {
+        let db = Db::start();
+        db.apply(ddl);
+        let mut client = db.client();
+        let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
+        let order = graph::order(&schema);
+        let verdict = classify::classify(&schema, &order);
+        emit::sql(&schema, &verdict, &emit::Options { seed: 7, rows: 12 })
+    };
+
+    let before = render(base);
+    let after = render(&format!(
+        "{base} CREATE TABLE unrelated (id int PRIMARY KEY, note text);"
+    ));
+
+    let users_before = before.lines().skip_while(|l| !l.contains("\"users\"")).take(13);
+    let users_after = after.lines().skip_while(|l| !l.contains("\"users\"")).take(13);
+    assert!(
+        users_before.eq(users_after),
+        "adding an unrelated table moved the values in users"
+    );
+
+    // And the same input twice is the same bytes, which is the simpler half.
+    assert_eq!(render(base), before, "two runs at one seed differed");
+}
+
+/// A unique column too narrow to hold the rows asked for.
+///
+/// `varying_columns` picks a column whose type has no small domain, and text
+/// qualifies — but `varchar(4)` is text with four characters to play with, and
+/// "alpha-37" truncated to four is "alph" every time. `volume` does not treat
+/// a length limit as a bound, so nothing caps the row count either. Whether
+/// this is a real hole is a question with an answer, so here it is asked.
+#[test]
+fn a_narrow_unique_column_is_not_quietly_overfilled() {
+    let (db, _) = seed(
+        "CREATE TABLE codes (id int PRIMARY KEY, code varchar(4) NOT NULL UNIQUE);
+         CREATE TABLE tight (id int PRIMARY KEY, c varchar(1) NOT NULL UNIQUE);
+         CREATE TABLE checked (
+             id int PRIMARY KEY,
+             c  text NOT NULL UNIQUE,
+             CONSTRAINT c_short CHECK ((char_length(c) <= 2))
+         );",
+        50,
+    );
+    // Four base-36 characters hold well over fifty values, so all fifty fit.
+    assert_eq!(count(&db, "codes"), 50);
+    // One character holds 36, and asking for fifty is the impossible question.
+    assert_eq!(count(&db, "tight"), 36, "a single character holds 36 of them");
+    // The same limit written as a CHECK is the same limit.
+    assert_eq!(count(&db, "checked"), 50, "36 * 36 leaves room for fifty");
+}

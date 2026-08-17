@@ -194,10 +194,11 @@ fn measure(name: &str, path: &Path) {
     // corpus and 1/55 on real paper. These nine schemas were written by people
     // who had never heard of this tool.
     //
-    // Five rows, not fifty: the point is whether Postgres accepts them, and a
-    // thousand-table schema at fifty rows each is a slow way to learn the same
-    // thing.
-    let options = pgsow::emit::Options { seed: 1, rows: 5 };
+    // The tool's own default, not a smaller number chosen to be quick. Five
+    // rows passed this gate while a `varchar(4)` unique column was still
+    // colliding at fifty — the collision needed more rows than the gate was
+    // asking for, which made the gate agree with itself and nothing else.
+    let options = pgsow::emit::Options { seed: 1, rows: 50 };
     let statements = pgsow::emit::statements(&schema, &verdict, &options);
 
     let (mut accepted, mut rejected) = (0usize, 0usize);
