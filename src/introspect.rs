@@ -116,17 +116,21 @@ const CONSTRAINTS_SQL: &str = "
 /// the nine corpus schemas, GitLab alone accounting for 1,046.
 ///
 /// `indnkeyatts` rather than `indnatts`: columns added with INCLUDE are stored
-/// in the index and are not part of what it makes unique.
+/// in the index and are not part of what it makes unique. `indkey` is an
+/// `int2vector`, which is subscripted from zero — so the slice ends at
+/// `indnkeyatts - 1`, and ending it at `indnkeyatts` took one column too many
+/// and made every INCLUDE index look like an expression index.
 const UNIQUE_INDEXES_SQL: &str = "
     SELECT n.nspname, c.relname, i.relname AS index_name,
            (SELECT array_agg(a.attname ORDER BY k.ord)
-              FROM unnest(ix.indkey[0:ix.indnkeyatts]) WITH ORDINALITY AS k(attnum, ord)
+              FROM unnest(ix.indkey[0:ix.indnkeyatts - 1]) WITH ORDINALITY AS k(attnum, ord)
               JOIN pg_attribute a
                 ON a.attrelid = c.oid AND a.attnum = k.attnum AND NOT a.attisdropped
            ) AS columns,
            ix.indnkeyatts,
            ix.indisunique AS is_unique,
-           (ix.indexprs IS NOT NULL) AS has_expression
+           (ix.indexprs IS NOT NULL) AS has_expression,
+           pg_get_indexdef(ix.indexrelid) AS definition
     FROM pg_index ix
     JOIN pg_class c ON c.oid = ix.indrelid
     JOIN pg_class i ON i.oid = ix.indexrelid
@@ -316,9 +320,13 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
         // no closed form for either here, so it is recorded as a check and
         // refuses its table like any other rule this cannot show it satisfies.
         if row.get::<_, bool>("has_expression") || columns.len() != key_columns as usize {
+            // Quoted verbatim, like every other rule this refuses. Saying
+            // only "over an expression" tells a reader nothing about what
+            // they would have to change, and leaves the closed set with
+            // nothing to match against when it comes to be widened.
             table.checks.push(CheckConstraint {
                 name: name.clone(),
-                definition: format!("INDEX {name} over an expression"),
+                definition: row.get("definition"),
             });
             continue;
         }
