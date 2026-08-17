@@ -94,6 +94,50 @@ const CONSTRAINTS_SQL: &str = "
 
 /// Enum labels, in declaration order — which is the order a person means when
 /// they say "the first status".
+/// Indexes that constrain what can be written, and that no constraint backs.
+///
+/// Two kinds, and the second is easy to miss.
+///
+/// A **unique index** is a uniqueness requirement exactly as binding as
+/// `UNIQUE (name)`, and it lives in `pg_index` rather than `pg_constraint` —
+/// so reading only constraints missed 1,397 of them across the nine corpus
+/// schemas, GitLab alone accounting for 1,046.
+///
+/// An **expression index** constrains the data whether or not it enforces
+/// uniqueness, because the expression is evaluated on every row inserted.
+/// Discourse indexes `((data)::jsonb ->> 'display_username')` on a `varchar`
+/// column, and that index is not unique — but an ordinary word written to
+/// `data` fails to cast and the insert is rejected. An index that cannot be
+/// violated can still refuse a row.
+///
+/// `CREATE UNIQUE INDEX ... ON t (name)` is a uniqueness requirement exactly
+/// as binding as `UNIQUE (name)`, and it lives in `pg_index` rather than
+/// `pg_constraint` — so reading only constraints missed 1,397 of them across
+/// the nine corpus schemas, GitLab alone accounting for 1,046.
+///
+/// `indnkeyatts` rather than `indnatts`: columns added with INCLUDE are stored
+/// in the index and are not part of what it makes unique.
+const UNIQUE_INDEXES_SQL: &str = "
+    SELECT n.nspname, c.relname, i.relname AS index_name,
+           (SELECT array_agg(a.attname ORDER BY k.ord)
+              FROM unnest(ix.indkey[0:ix.indnkeyatts]) WITH ORDINALITY AS k(attnum, ord)
+              JOIN pg_attribute a
+                ON a.attrelid = c.oid AND a.attnum = k.attnum AND NOT a.attisdropped
+           ) AS columns,
+           ix.indnkeyatts,
+           ix.indisunique AS is_unique,
+           (ix.indexprs IS NOT NULL) AS has_expression
+    FROM pg_index ix
+    JOIN pg_class c ON c.oid = ix.indrelid
+    JOIN pg_class i ON i.oid = ix.indexrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE (ix.indisunique OR ix.indexprs IS NOT NULL)
+      AND ix.indislive
+      AND n.nspname = ANY($1)
+      AND NOT EXISTS (
+            SELECT 1 FROM pg_constraint con WHERE con.conindid = ix.indexrelid)
+    ORDER BY n.nspname, c.relname, i.relname";
+
 const ENUMS_SQL: &str = "
     SELECT t.typname, n.nspname, e.enumlabel
     FROM pg_enum e
@@ -249,6 +293,47 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
             is_generated: row.get::<_, bool>("generated"),
             position: row.get::<_, i16>("attnum") as i32,
         });
+    }
+
+    // Unique indexes, which are a uniqueness requirement as binding as a
+    // unique constraint and are not stored as one.
+    for row in client.query(UNIQUE_INDEXES_SQL, &[&schemas])? {
+        let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
+        let Some(table) = schema.tables.get_mut(&id) else { continue };
+        let name: String = row.get("index_name");
+        let columns: Vec<String> = row.try_get("columns").unwrap_or_default();
+        let key_columns: i16 = row.get("indnkeyatts");
+
+        // An index over an expression — `lower(email)` — is a rule about a
+        // computed value, and making the underlying column distinct does not
+        // make the expression distinct. There is no closed form for it here,
+        // so it is recorded as a check and refuses its table, the same as any
+        // other rule this cannot show it satisfies.
+        // An index over an expression — `lower(email)`, `(data)::jsonb ->>
+        // 'x'` — is a rule about a computed value. Making the underlying
+        // column distinct does not make the expression distinct, and an
+        // expression that fails to evaluate rejects the row outright. There is
+        // no closed form for either here, so it is recorded as a check and
+        // refuses its table like any other rule this cannot show it satisfies.
+        if row.get::<_, bool>("has_expression") || columns.len() != key_columns as usize {
+            table.checks.push(CheckConstraint {
+                name: name.clone(),
+                definition: format!("INDEX {name} over an expression"),
+            });
+            continue;
+        }
+
+        // Not unique and not an expression: it constrains nothing, and only
+        // arrived here because the query asks for both kinds at once.
+        if !row.get::<_, bool>("is_unique") {
+            continue;
+        }
+
+        // A partial index constrains only the rows matching its predicate.
+        // Treating it as constraining every row is *stricter* than the real
+        // rule, and stricter is the safe direction: rows that are all distinct
+        // satisfy a requirement that only some of them be.
+        table.unique_keys.push(UniqueKey { name, columns, is_primary: false });
     }
 
     for row in client.query(CONSTRAINTS_SQL, &[&schemas])? {

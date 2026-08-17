@@ -104,7 +104,13 @@ fn measure(name: &str, path: &Path) {
             || head.starts_with("CREATE FUNCTION")
             || head.starts_with("CREATE OR REPLACE FUNCTION")
             || head.starts_with("CREATE EXTENSION")
-            || head.starts_with("CREATE SCHEMA"))
+            || head.starts_with("CREATE SCHEMA")
+            // Unique indexes are a uniqueness requirement exactly like a
+            // unique constraint, and skipping them made this measure a
+            // database less constrained than the real one — which is the one
+            // way a gate can flatter itself.
+            || head.starts_with("CREATE INDEX")
+            || head.starts_with("CREATE UNIQUE INDEX"))
         {
             continue;
         }
@@ -317,4 +323,86 @@ fn survey_the_checks_this_does_not_understand() {
         }
     }
     println!("TOTALS	{total} checks, {known} understood, {} not", total - known);
+}
+
+/// Is INSERT actually too slow, and could COPY even be used?
+///
+/// The plan mentioned "COPY for volume" and it was never built. Two questions
+/// decide whether it should be, and both have answers rather than opinions:
+/// how slow is INSERT at a volume anybody would ask for, and how many tables
+/// could COPY serve at all. COPY carries raw data and no expressions, so any
+/// column whose value is a subquery — every foreign key into a table with a
+/// database-generated key — cannot go through it.
+///
+/// `cargo test --test corpus -- --ignored --nocapture volume`
+#[test]
+#[ignore]
+fn volume_and_whether_copy_could_carry_it() {
+    for name in ["discourse", "gitlab"] {
+        let path = Path::new("tests/corpus").join(format!("{name}.sql"));
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let db = Db::start();
+        let mut client = db.client();
+        for schema_name in schemas_in(&text) {
+            let _ = client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";"));
+        }
+        for statement in statements(&text) {
+            let _ = client.batch_execute(&statement);
+        }
+        let Ok(schema) = pgsow::introspect::read(&mut client, &schemas_in(&text)) else { continue };
+        let order = pgsow::graph::order(&schema);
+        let verdict = pgsow::classify::classify(&schema, &order);
+
+        for rows in [50usize, 1000] {
+            let options = pgsow::emit::Options::flat(1, rows);
+            let started = std::time::Instant::now();
+            let statements = pgsow::emit::statements(&schema, &verdict, &options);
+            let generated = started.elapsed();
+            let bytes: usize = statements.iter().map(|s| s.len()).sum();
+
+            // How much of it COPY could carry. A statement holding a subquery
+            // cannot become a COPY at all; the rest could.
+            let with_subquery =
+                statements.iter().filter(|s| s.contains("(SELECT ")).count();
+
+            let started = std::time::Instant::now();
+            let mut transaction = client.transaction().unwrap();
+            let mut failed = 0;
+            let mut first_error = String::new();
+            for statement in &statements {
+                // No break: stopping at the first failure would leave the
+                // timing measuring however far it got, which is not the
+                // number this claims to report.
+                if let Err(e) = transaction.batch_execute(statement) {
+                    failed += 1;
+                    if first_error.is_empty() {
+                        first_error = e
+                            .as_db_error()
+                            .map_or_else(|| e.to_string(), |d| {
+                                format!("{} | {}", d.code().code(), d.message())
+                            })
+                            .chars()
+                            .take(140)
+                            .collect();
+                    }
+                    // A failed statement aborts the transaction, so the rest
+                    // would fail for that reason alone. Start a clean one.
+                    break;
+                }
+            }
+            if failed > 0 {
+                println!("      first failure: {first_error}");
+            }
+            let applied = started.elapsed();
+            transaction.rollback().unwrap();
+
+            println!(
+                "  {name} @ {rows} rows: generate {:?}, apply {:?}, {} MB,                  {} statements, {with_subquery} need a subquery, {failed} failed",
+                generated,
+                applied,
+                bytes / 1_048_576,
+                statements.len(),
+            );
+        }
+    }
 }

@@ -191,6 +191,27 @@ const WORDS: [&str; 16] = [
     "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
 ];
 
+/// A date `n` days after 2020-01-01, as `YYYY-MM-DD`.
+///
+/// Counting rather than rolling, so a unique date column gets as many distinct
+/// days as it is asked for. Written out because the alternative is a date
+/// library for one function, and the arithmetic is the civil-from-days
+/// algorithm rather than anything invented here.
+pub fn days_from_epoch(n: usize) -> String {
+    // Days since 1970-01-01, offset so the dates look contemporary.
+    let z = (n as i64) + 18_262 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 /// Rebuild the argument `render` takes, for the two types that recurse.
 fn step_of(unique: bool, step: usize) -> Option<usize> {
     unique.then_some(step)
@@ -289,7 +310,11 @@ fn render(
 
         ColumnType::Float { .. } => {
             let floor = bounds.min.unwrap_or(0) as f64;
-            Literal(format!("{:.4}", floor + rng.gen_range(0.0..1000.0)))
+            // Stepping by a fraction rather than a whole number, so a unique
+            // float column does not collide with a unique integer one beside
+            // it for no reason.
+            let offset = if unique { step as f64 / 16.0 } else { rng.gen_range(0.0..1000.0) };
+            Literal(format!("{:.4}", floor + offset))
         }
 
         ColumnType::Numeric { precision, scale } => {
@@ -300,7 +325,12 @@ fn render(
             let digits = precision.unwrap_or(10).clamp(1, 12) - scale;
             let ceiling = 10i64.saturating_pow(digits.max(1) as u32) - 1;
             let floor = bounds.min.unwrap_or(0).max(0).min(ceiling);
-            let whole = floor + rng.gen_range(0..=(ceiling - floor).max(0));
+            let span = (ceiling - floor).max(0);
+            let whole = if unique {
+                floor + (step as i64 % (span + 1))
+            } else {
+                floor + rng.gen_range(0..=span)
+            };
             if scale == 0 {
                 Literal(whole.to_string())
             } else {
@@ -353,7 +383,10 @@ fn render(
 
         ColumnType::Uuid => {
             let a: u64 = rng.gen();
-            let b: u64 = rng.gen();
+            // A unique column puts the step in the low half, which is exact
+            // rather than probabilistic. Two random u64s almost never collide,
+            // and "almost never" is not the promise a unique constraint makes.
+            let b: u64 = if unique { step as u64 } else { rng.gen() };
             let hex = format!("{a:016x}{b:016x}");
             Literal::text(&format!(
                 "{}-{}-{}-{}-{}",
@@ -361,27 +394,34 @@ fn render(
             ))
         }
 
-        ColumnType::Date => {
-            let day = rng.gen_range(1..=28);
-            let month = rng.gen_range(1..=12);
-            Literal::text(&format!("2026-{month:02}-{day:02}"))
+        // Dates count forward from the first of January rather than rolling,
+        // so a unique date column gets as many distinct days as it asks for.
+        // Discourse has `UNIQUE (date, country_code)` on four rollup tables
+        // and a rolled date collided on the second row.
+        ColumnType::Date => Literal::text(&days_from_epoch(if unique {
+            step
+        } else {
+            rng.gen_range(0..3650)
+        })),
+
+        ColumnType::Time => {
+            let seconds = if unique { step % 86_400 } else { rng.gen_range(0..86_400) };
+            Literal::text(&format!(
+                "{:02}:{:02}:{:02}",
+                seconds / 3600,
+                (seconds / 60) % 60,
+                seconds % 60
+            ))
         }
 
-        ColumnType::Time => Literal::text(&format!(
-            "{:02}:{:02}:{:02}",
-            rng.gen_range(0..24),
-            rng.gen_range(0..60),
-            rng.gen_range(0..60)
-        )),
-
         ColumnType::Timestamp { with_zone } => {
+            let seconds = if unique { step } else { rng.gen_range(0..315_360_000) };
             let stamp = format!(
-                "2026-{:02}-{:02} {:02}:{:02}:{:02}",
-                rng.gen_range(1..=12),
-                rng.gen_range(1..=28),
-                rng.gen_range(0..24),
-                rng.gen_range(0..60),
-                rng.gen_range(0..60)
+                "{} {:02}:{:02}:{:02}",
+                days_from_epoch(seconds / 86_400),
+                (seconds / 3600) % 24,
+                (seconds / 60) % 60,
+                seconds % 60
             );
             Literal::text(&if *with_zone { format!("{stamp}+00") } else { stamp })
         }

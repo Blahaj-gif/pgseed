@@ -235,18 +235,23 @@ pub fn classify(schema: &Schema, order: &Order) -> Verdict {
                 continue;
             }
             for fk in &table.foreign_keys {
-                // A nullable key is not a dependency that can block: the row
-                // can simply be written without it.
-                if fk.is_optional(table) || fk.references == *id {
+                if fk.references == *id {
                     continue;
                 }
-                // The column chosen to satisfy `num_nonnulls(...) = 1` has
-                // to be one that certainly gets a value. If it is a foreign
-                // key whose parent is refused there is no pool to draw from,
-                // it comes out NULL, and the count is zero rather than one.
-                // Nothing else refuses this table: the key is nullable, so it
-                // reads as optional, and the ordinary contagion below lets it
-                // through.
+                // The column chosen to satisfy `num_nonnulls(...) = 1` has to
+                // be one that certainly gets a value. If it is a foreign key
+                // whose parent is refused there is no pool to draw from, it
+                // comes out NULL, and the count is zero rather than one.
+                //
+                // This has to be asked *before* the nullable skip below, not
+                // after. Every column of a `num_nonnulls` group is nullable by
+                // definition — that is what makes the constraint expressible —
+                // so the skip swallowed this rule entirely and it never ran
+                // once. It passed anyway while few parents were refused, which
+                // is the whole trouble with a test agreeing for the wrong
+                // reason: reading unique indexes refused far more tables, and
+                // the CHECK violations it was written to prevent came straight
+                // back.
                 if fk_carries_the_only_value(table, fk)
                     && (refused_ids.contains(&fk.references)
                         || !schema.tables.contains_key(&fk.references))
@@ -260,6 +265,12 @@ pub fn classify(schema: &Schema, order: &Order) -> Verdict {
                     ));
                     added = true;
                     break;
+                }
+
+                // A nullable key is not a dependency that can block: the row
+                // can simply be written without it.
+                if fk.is_optional(table) {
+                    continue;
                 }
 
                 // A parent that was never read is not a free pass either. It
