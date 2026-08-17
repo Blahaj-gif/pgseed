@@ -1,0 +1,22 @@
+{
+  "why": "Real schemas, not written by this project. A hand-written corpus would only contain the constructs its author remembered to handle, which measures agreement rather than accuracy. The files are fetched on purpose and are not committed: they are large, they belong to their projects, and the URL is the durable part.",
+  "fetch": "python tests/corpus/fetch.py",
+  "schemas": [
+    {
+      "name": "synapse",
+      "file": "synapse.sql",
+      "project": "element-hq/synapse",
+      "licence": "AGPL-3.0",
+      "url": "https://raw.githubusercontent.com/element-hq/synapse/develop/synapse/storage/schema/main/full_schemas/72/full.sql.postgres",
+      "notes": "Matrix homeserver. ~134 tables, modest use of CHECK."
+    },
+    {
+      "name": "gitlab",
+      "file": "gitlab.sql",
+      "project": "gitlabhq/gitlabhq",
+      "licence": "MIT",
+      "url": "https://raw.githubusercontent.com/gitlabhq/gitlabhq/master/db/structure.sql",
+      "notes": "~955 tables and 2,537 CHECK expressions. The schema that showed the refuse-every-CHECK policy was too blunt to be useful."
+    }
+  ]
+}

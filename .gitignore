@@ -2,3 +2,9 @@
 # A connection string is a credential.
 .env
 *.dsn
+
+# The schema corpus: other projects' files, fetched on purpose by
+# tests/corpus/fetch.py. Large, and not ours to redistribute — sources.json
+# records where each came from and under what licence, which is the part worth
+# keeping in the repository.
+tests/corpus/*.sql
