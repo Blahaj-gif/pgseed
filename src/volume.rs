@@ -132,44 +132,89 @@ fn covering_key<'t>(table: &'t Table, column: &str) -> Option<&'t ForeignKey> {
         .find(|fk| fk.columns.iter().any(|c| c == column))
 }
 
-/// Columns the generator must vary per row, so that no unique key repeats.
+/// How the generator must vary each column so that no unique key repeats.
 ///
-/// A single-column key is the easy case and was the only one handled: vary
-/// that column and it is unique. A composite key had nothing done for it at
-/// all, so `PRIMARY KEY (first_name, last_name)` drew both names from a
-/// sixteen-word list and collided almost immediately.
+/// The value is a *stride*: the column changes once every that many rows. One
+/// means it changes every row, which is all a single-column key ever needs.
 ///
-/// A tuple is distinct as soon as *one* of its columns is, so only one column
-/// per key needs to vary. It has to be one that actually can: not drawn from a
-/// parent, where the values are whatever the parent had, and not of a type
-/// with fewer values than there are rows — varying a boolean gives two of
-/// everything, whatever the row index says.
+/// A composite key had nothing done for it at all to begin with, so
+/// `PRIMARY KEY (first_name, last_name)` drew both from a sixteen-word list
+/// and collided. A tuple is distinct as soon as one of its columns is, so the
+/// first column with room to spare gets a stride of one and carries the whole
+/// key. Where no column has room — `UNIQUE (is_active, status)`, a boolean and
+/// a three-label enum — the columns are walked as digits of one number
+/// instead: the boolean flips every row, the enum advances every second row,
+/// and the six combinations come out before any repeats. `capacity` caps the
+/// row count at that same six, so the two agree by construction.
 ///
-/// **Known limit:** a composite key made entirely of bounded columns —
-/// `UNIQUE (is_active, status)` — has no column that can carry the whole
-/// tuple's distinctness, and would need the columns walked as an odometer.
-/// `capacity` still caps the row count at the product, so the failure is a
-/// duplicate rather than an overflow, but it is a gap and it is not closed.
-pub fn varying_columns(table: &Table) -> std::collections::BTreeSet<String> {
-    let mut out = std::collections::BTreeSet::new();
+/// **Known limit, and it is deliberate:** a column named by two unique keys
+/// can only have one stride, and the second key's odometer would need a
+/// different one. The first key by declaration order wins. Two overlapping
+/// composite keys of bounded columns is the one shape this does not promise,
+/// and `overlapping_keys` refuses rather than hoping.
+pub fn variations(table: &Table) -> BTreeMap<String, usize> {
+    let mut out: BTreeMap<String, usize> = BTreeMap::new();
     for key in &table.unique_keys {
         if key.columns.len() == 1 {
-            out.insert(key.columns[0].clone());
+            out.entry(key.columns[0].clone()).or_insert(1);
             continue;
         }
-        // The widest column, not merely an unbounded one: given a boolean and
-        // a varchar(8), the varchar carries the tuple's distinctness much
-        // further. `None` means no bound worth counting, so it sorts highest.
-        let chosen = key
-            .columns
-            .iter()
-            .filter(|name| covering_key(table, name).is_none())
-            .max_by_key(|name| column_domain(table, name).unwrap_or(usize::MAX));
-        if let Some(name) = chosen {
-            out.insert(name.clone());
+        // Columns drawn from a parent are skipped: their values are whatever
+        // the parent had, and `strides` walks those instead.
+        let mut step = 1usize;
+        for name in key.columns.iter().filter(|c| covering_key(table, c).is_none()) {
+            out.entry(name.clone()).or_insert(step);
+            match column_domain(table, name) {
+                // Bounded, so it wraps — the next column has to advance once
+                // this one has been all the way round.
+                Some(size) => step = step.saturating_mul(size.max(1)),
+                // Room to spare: this column alone keeps the tuple distinct,
+                // and the rest are better left varying freely than pinned.
+                None => break,
+            }
         }
     }
     out
+}
+
+/// Unique keys that cannot both be enumerated, because they share a column and
+/// each would need it to advance at a different rate.
+///
+/// `PRIMARY KEY (a, b)` beside `UNIQUE (b, c)` is the shape. One odometer
+/// cannot serve both, so rather than satisfy the first and hope the second
+/// falls out, the table is named. Only counted where it can actually bite:
+/// both keys composite, and every shared column bounded, since an unbounded
+/// column keeps its own key distinct on its own and needs no odometer.
+pub fn overlapping_keys(table: &Table) -> Option<(String, String)> {
+    let composite: Vec<&UniqueKey> =
+        table.unique_keys.iter().filter(|k| k.columns.len() > 1).collect();
+    for (index, first) in composite.iter().enumerate() {
+        for second in &composite[index + 1..] {
+            let shared: Vec<&String> = first
+                .columns
+                .iter()
+                .filter(|c| second.columns.contains(c))
+                .collect();
+            if shared.is_empty() {
+                continue;
+            }
+            // If either key holds a column with room to spare that the other
+            // does not share, that column carries its key alone and the two
+            // do not contend.
+            let independent = |key: &UniqueKey| {
+                key.columns.iter().any(|c| {
+                    !shared.contains(&c)
+                        && covering_key(table, c).is_none()
+                        && column_domain(table, c).is_none()
+                })
+            };
+            if independent(first) || independent(second) {
+                continue;
+            }
+            return Some((first.name.clone(), second.name.clone()));
+        }
+    }
+    None
 }
 
 /// How far apart consecutive rows step through each parent's pool.

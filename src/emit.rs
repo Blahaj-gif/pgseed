@@ -189,10 +189,10 @@ pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<
         // as digits of one number so the combinations do not repeat.
         let strides = crate::volume::strides(table, &counts);
 
-        // Columns that have to differ row to row, so no unique key repeats —
-        // including composite keys, where varying any one column is enough to
-        // make the whole tuple distinct.
-        let varying = crate::volume::varying_columns(table);
+        // How often each column has to change so no unique key repeats. One
+        // means every row; a larger stride makes the column a slower digit of
+        // a composite key's odometer.
+        let varying = crate::volume::variations(table);
 
         for row in 0..rows {
             let mut values: Vec<String> = Vec::with_capacity(columns.len());
@@ -259,7 +259,7 @@ pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<
                         column,
                         row,
                         bounds.get(&column.name).unwrap_or(&Bounds::default()),
-                        varying.contains(&column.name),
+                        varying.get(&column.name).copied(),
                     )
                 };
                 this_row.insert(column.name.clone(), literal.clone());

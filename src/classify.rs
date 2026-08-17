@@ -32,6 +32,8 @@ pub enum Refusal {
     /// A required column points at a table that is itself refused, so any row
     /// here would reference nothing.
     DependsOnRefused { table: TableId, constraint: String },
+    /// Two unique keys that share a column and cannot both be enumerated.
+    UnsatisfiableKeys { first: String, second: String },
     /// A required column points at a table that was never read — in a schema
     /// that was not asked for, or of a kind introspection skips. Whether it
     /// holds any rows to point at is not knowable from here.
@@ -53,6 +55,9 @@ impl Refusal {
             Refusal::UnbreakableCycle { reason } => reason.clone(),
             Refusal::DependsOnRefused { table, constraint } => format!(
                 "foreign key \"{constraint}\" requires {table}, which is itself refused"
+            ),
+            Refusal::UnsatisfiableKeys { first, second } => format!(
+                "unique keys \"{first}\" and \"{second}\" share a column with no room                  to spare, so this cannot make both distinct at once"
             ),
             Refusal::DependsOnUnread { table, constraint } => format!(
                 "foreign key \"{constraint}\" requires {table}, which was not read — \
@@ -171,6 +176,13 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
                 type_name: column.type_.describe(),
             });
         }
+    }
+
+    // Two composite unique keys sharing a bounded column. One odometer cannot
+    // advance a column at two different rates, so satisfying the first and
+    // hoping the second falls out is exactly the guess this does not make.
+    if let Some((first, second)) = crate::volume::overlapping_keys(table) {
+        out.push(Refusal::UnsatisfiableKeys { first, second });
     }
 
     if let Some(reason) = order.reason_for(&table.id) {

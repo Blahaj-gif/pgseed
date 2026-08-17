@@ -191,6 +191,11 @@ const WORDS: [&str; 16] = [
     "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
 ];
 
+/// Rebuild the argument `render` takes, for the two types that recurse.
+fn step_of(unique: bool, step: usize) -> Option<usize> {
+    unique.then_some(step)
+}
+
 /// A row index as the shortest distinct string that can stand for it.
 ///
 /// Base 36 rather than decimal because a `varchar(4)` column holds 1,679,616
@@ -230,28 +235,34 @@ pub fn value(
     column: &Column,
     row: usize,
     bounds: &Bounds,
-    unique: bool,
+    variation: Option<usize>,
 ) -> Literal {
     if bounds.must_be_null {
         return Literal::null();
     }
     let mut rng = stream(seed, table, &column.name, row);
-    render(&mut rng, &column.type_, row, bounds, unique)
+    // The stride is how often this column has to change: every row for a
+    // single-column key, every Nth row for a digit of a composite one. The
+    // index it steps by is the row divided by it.
+    let step = variation.map(|stride| row / stride.max(1));
+    render(&mut rng, &column.type_, row, step, bounds)
 }
 
 fn render(
     rng: &mut ChaCha8Rng,
     type_: &ColumnType,
     row: usize,
+    step: Option<usize>,
     bounds: &Bounds,
-    unique: bool,
 ) -> Literal {
+    let unique = step.is_some();
+    let step = step.unwrap_or(row);
     match type_ {
         // Two values, so a unique column walks them rather than rolling: two
         // rolls of a coin agree half the time, and the row count is capped at
         // two anyway by `volume`.
         ColumnType::Boolean => {
-            let b = if unique { row % 2 == 1 } else { rng.gen::<bool>() };
+            let b = if unique { step % 2 == 1 } else { rng.gen::<bool>() };
             Literal(if b { "true" } else { "false" }.into())
         }
 
@@ -269,7 +280,7 @@ fn render(
             // rolling twice in a small range collides sooner than anyone
             // expects.
             let n = if unique {
-                floor + (row as i64 % span)
+                floor + (step as i64 % span)
             } else {
                 floor + rng.gen_range(0..span.min(1_000_000))
             };
@@ -315,7 +326,7 @@ fn render(
                 // word fills whatever room is left over.
                 (true, Some(limit)) => {
                     let limit = limit.max(1) as usize;
-                    let tag = base36(row);
+                    let tag = base36(step);
                     let room = limit.saturating_sub(tag.chars().count());
                     let head: String = word.chars().take(room).collect();
                     let tail: String = {
@@ -324,7 +335,7 @@ fn render(
                     };
                     format!("{head}{tail}")
                 }
-                (true, None) => format!("{word}-{row}"),
+                (true, None) => format!("{word}-{step}"),
                 (false, _) => word.to_string(),
             };
             if let Some(limit) = limit {
@@ -430,13 +441,13 @@ fn render(
             } else if unique {
                 // As with a boolean: the labels are the whole domain, so step
                 // through them instead of drawing and hoping.
-                Literal::text(&labels[row % labels.len()])
+                Literal::text(&labels[step % labels.len()])
             } else {
                 Literal::text(&labels[rng.gen_range(0..labels.len())])
             }
         }
 
-        ColumnType::Domain { inner, .. } => render(rng, inner, row, bounds, unique),
+        ColumnType::Domain { inner, .. } => render(rng, inner, row, step_of(unique, step), bounds),
 
         // One element is enough to be a valid array, and a longer one only
         // makes a failure harder to read.
@@ -447,7 +458,7 @@ fn render(
             // nine real schemas. Where the element type has no unambiguous
             // name to write, the array goes out uncast as before rather than
             // naming a type that might belong to another schema.
-            let Literal(inner) = render(rng, of, row, bounds, unique);
+            let Literal(inner) = render(rng, of, row, step_of(unique, step), bounds);
             match of.sql_name() {
                 Some(name) => Literal(format!("ARRAY[{inner}]::{name}[]")),
                 None => Literal(format!("ARRAY[{inner}]")),
@@ -483,14 +494,14 @@ mod tests {
     }
 
     fn generate(column: &Column, row: usize, bounds: &Bounds) -> String {
-        value(42, &table_id(), column, row, bounds, false).0
+        value(42, &table_id(), column, row, bounds, None).0
     }
 
     #[test]
     fn the_same_seed_and_cell_always_produce_the_same_value() {
         let c = column("name", ColumnType::Text { max_length: None });
-        let first = value(7, &table_id(), &c, 3, &Bounds::default(), false);
-        let again = value(7, &table_id(), &c, 3, &Bounds::default(), false);
+        let first = value(7, &table_id(), &c, 3, &Bounds::default(), None);
+        let again = value(7, &table_id(), &c, 3, &Bounds::default(), None);
         assert_eq!(first, again);
     }
 
@@ -500,21 +511,21 @@ mod tests {
         // sequence: adding a table, or changing another table's row count,
         // must not shift the values here. A global stream fails exactly this.
         let c = column("name", ColumnType::Text { max_length: None });
-        let mine = value(7, &table_id(), &c, 3, &Bounds::default(), false);
+        let mine = value(7, &table_id(), &c, 3, &Bounds::default(), None);
 
         // Whatever anybody else generates, in any quantity, first.
         let other = TableId::new("public", "somewhere_else");
         for row in 0..500 {
-            let _ = value(7, &other, &c, row, &Bounds::default(), false);
+            let _ = value(7, &other, &c, row, &Bounds::default(), None);
         }
-        assert_eq!(value(7, &table_id(), &c, 3, &Bounds::default(), false), mine);
+        assert_eq!(value(7, &table_id(), &c, 3, &Bounds::default(), None), mine);
     }
 
     #[test]
     fn different_seeds_give_different_data() {
         let c = column("name", ColumnType::Text { max_length: None });
-        let a = value(1, &table_id(), &c, 0, &Bounds::default(), false);
-        let b = value(2, &table_id(), &c, 0, &Bounds::default(), false);
+        let a = value(1, &table_id(), &c, 0, &Bounds::default(), None);
+        let b = value(2, &table_id(), &c, 0, &Bounds::default(), None);
         assert_ne!(a, b);
     }
 
@@ -599,7 +610,7 @@ mod tests {
         let c = column("email", ColumnType::Text { max_length: None });
         let mut seen = std::collections::BTreeSet::new();
         for row in 0..200 {
-            let v = value(1, &table_id(), &c, row, &Bounds::default(), true);
+            let v = value(1, &table_id(), &c, row, &Bounds::default(), Some(1));
             assert!(seen.insert(v.0.clone()), "{:?} appeared twice", v);
         }
     }

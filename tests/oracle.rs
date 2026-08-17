@@ -643,3 +643,76 @@ fn two_columns_that_both_must_hold_a_value_cannot_have_one_between_them() {
     assert!(verdict.fillable.is_empty(), "there is no choice to make here");
     assert!(verdict.refused[0].1[0].explain().contains("num_nonnulls"));
 }
+
+/// A composite key where no single column has room to carry it.
+///
+/// The rule was "one column of the tuple varies and that makes the tuple
+/// distinct", which needs a column with room to spare. A boolean and a
+/// three-label enum have none: varying either alone gives two or three
+/// distinct pairs and then repeats. The columns are walked as digits instead —
+/// the boolean flips every row, the enum advances every second row — and the
+/// row count is capped at the six combinations that exist.
+#[test]
+fn a_composite_key_of_narrow_columns_is_walked_rather_than_guessed() {
+    let (db, _) = seed(
+        "CREATE TYPE state AS ENUM ('new', 'open', 'done');
+         CREATE TABLE narrow (
+             flag   boolean NOT NULL,
+             status state   NOT NULL,
+             note   text,
+             PRIMARY KEY (flag, status)
+         );",
+        50,
+    );
+    assert_eq!(count(&db, "narrow"), 6, "two booleans times three labels");
+
+    // All six, not the same one six times.
+    let pairs: i64 = db
+        .client()
+        .query_one("SELECT count(*) FROM (SELECT DISTINCT flag, status FROM narrow) d", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(pairs, 6);
+}
+
+/// Two composite keys sharing a column that neither can spare.
+///
+/// One odometer cannot advance a column at two different rates, so this is
+/// refused by name rather than satisfying the first key and hoping the second
+/// falls out.
+#[test]
+fn two_keys_that_contend_for_one_column_are_refused_rather_than_hoped_over() {
+    let db = Db::start();
+    db.apply(
+        "CREATE TYPE colour AS ENUM ('red', 'green');
+         CREATE TABLE contended (
+             a colour NOT NULL,
+             b colour NOT NULL,
+             c colour NOT NULL,
+             PRIMARY KEY (a, b),
+             CONSTRAINT other UNIQUE (b, c)
+         );
+         CREATE TABLE roomy (
+             a colour NOT NULL,
+             b text    NOT NULL,
+             c text    NOT NULL,
+             PRIMARY KEY (a, b),
+             CONSTRAINT fine UNIQUE (b, c)
+         );",
+    );
+    let mut client = db.client();
+    let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = graph::order(&schema);
+    let verdict = classify::classify(&schema, &order);
+
+    let (_, reasons) = verdict.refused.iter().find(|(t, _)| t.name == "contended")
+        .expect("two narrow keys contending should be refused");
+    assert!(reasons[0].explain().contains("share a column"), "{:?}", reasons[0]);
+
+    // And a table whose keys each have a column with room to spare is fine:
+    // each carries its own key and they never contend.
+    assert!(
+        verdict.fillable.iter().any(|t| t.name == "roomy"),
+        "this one should not have been caught by the same rule"
+    );
+}
