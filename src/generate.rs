@@ -153,7 +153,13 @@ fn render(
     unique: bool,
 ) -> Literal {
     match type_ {
-        ColumnType::Boolean => Literal(if rng.gen::<bool>() { "true" } else { "false" }.into()),
+        // Two values, so a unique column walks them rather than rolling: two
+        // rolls of a coin agree half the time, and the row count is capped at
+        // two anyway by `volume`.
+        ColumnType::Boolean => {
+            let b = if unique { row % 2 == 1 } else { rng.gen::<bool>() };
+            Literal(if b { "true" } else { "false" }.into())
+        }
 
         ColumnType::Integer { bytes } => {
             // Bounded by the column's own width, so a smallint never overflows,
@@ -294,6 +300,10 @@ fn render(
         ColumnType::Enum { labels, .. } => {
             if labels.is_empty() {
                 Literal::null()
+            } else if unique {
+                // As with a boolean: the labels are the whole domain, so step
+                // through them instead of drawing and hoping.
+                Literal::text(&labels[row % labels.len()])
             } else {
                 Literal::text(&labels[rng.gen_range(0..labels.len())])
             }

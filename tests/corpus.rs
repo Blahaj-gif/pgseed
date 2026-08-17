@@ -183,6 +183,69 @@ fn measure(name: &str, path: &Path) {
         }
         seen.insert(id.clone());
     }
+
+    // And now the test the plan called the whole project: generate rows for
+    // this schema and make the database judge them.
+    //
+    // Every oracle test until this one ran against DDL written here, which
+    // means it could only ever contain constructs someone here remembered to
+    // handle. That is precisely how Crossfoot scored 17/22 on its author's own
+    // corpus and 1/55 on real paper. These nine schemas were written by people
+    // who had never heard of this tool.
+    //
+    // Five rows, not fifty: the point is whether Postgres accepts them, and a
+    // thousand-table schema at fifty rows each is a slow way to learn the same
+    // thing.
+    let options = pgsow::emit::Options { seed: 1, rows: 5 };
+    let statements = pgsow::emit::statements(&schema, &verdict, &options);
+
+    let (mut accepted, mut rejected) = (0usize, 0usize);
+    let mut first_failures: Vec<String> = Vec::new();
+    let mut by_code: std::collections::BTreeMap<String, usize> = Default::default();
+    for statement in &statements {
+        match client.batch_execute(statement) {
+            Ok(()) => accepted += 1,
+            Err(e) => {
+                rejected += 1;
+                let code = e.as_db_error().map_or("?".into(), |d| d.code().code().to_string());
+                *by_code.entry(code).or_insert(0usize) += 1;
+                // A CHECK violation is the one that matters: it is data that
+                // breaks a rule the schema stated, which is the exact failure
+                // this project was built to refuse rather than commit.
+                if matches!(code.as_str(), "23514" | "22000") {
+                    println!("      DOCTRINE {code}: {}",
+                        e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().into()));
+                }
+                if first_failures.len() < 3 {
+                    let head: String = statement.lines().take(2).collect::<Vec<_>>().join(" ");
+                    let head: String = head.chars().take(110).collect();
+                    first_failures.push(format!("{}
+        {head}",
+                        e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().into())));
+                }
+            }
+        }
+    }
+
+    println!(
+        "    generated: {} statements · {accepted} accepted · {rejected} REJECTED",
+        statements.len()
+    );
+    for (code, n) in &by_code {
+        // 23505 duplicate key · 23502 not-null · 23503 foreign key · 42804 type
+        println!("      SQLSTATE {code}: {n}");
+    }
+    for failure in &first_failures {
+        println!("      rejected: {failure}");
+    }
+
+    // Reported, not asserted, on this first run. The number is the finding;
+    // turning it into a gate is the next commit, once it is known what the
+    // number even is. A gate set to whatever today's figure happens to be
+    // measures nothing.
+    if rejected > 0 {
+        eprintln!("  {name}: {rejected} of {} statements rejected", statements.len());
+    }
 }
 
 #[test]

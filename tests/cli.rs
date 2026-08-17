@@ -63,10 +63,23 @@ fn the_two_streams_are_kept_apart_and_the_exit_codes_mean_something() {
 #[test]
 fn plan_reports_and_writes_nothing_at_all() {
     let db = Db::start();
-    db.apply("CREATE TABLE users (id int PRIMARY KEY);");
-    let (stdout, stderr, _) = run(&db.url, &["--plan"]);
+    db.apply(
+        "CREATE TABLE users (id int PRIMARY KEY);
+         CREATE TABLE flags (id int PRIMARY KEY, on_off bool UNIQUE);",
+    );
+    let (stdout, stderr, _) = run(&db.url, &["--plan", "--rows", "9"]);
     assert!(stdout.is_empty(), "--plan produced SQL: {stdout}");
     assert!(stderr.contains("would fill"));
+
+    // A table that cannot hold what was asked for says so in the plan, rather
+    // than quietly returning a third of it.
+    assert!(stderr.contains("capped"), "the cap went unmentioned: {stderr}");
+    let flags = stderr.lines().find(|l| l.contains("flags")).unwrap_or("");
+    assert!(flags.contains(" 2 "), "a unique bool holds 2, not more: {flags}");
+    assert!(
+        stderr.lines().any(|l| l.contains("users") && !l.contains("capped")),
+        "an unbounded table should not be reported as capped: {stderr}"
+    );
 }
 
 #[test]

@@ -146,13 +146,26 @@ pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<
         out.push("SET CONSTRAINTS ALL DEFERRED;".into());
     }
 
+    // How many rows each table gets: what was asked for, or as many as its
+    // constraints leave room for. Not recomputed per table — a cap on a parent
+    // caps its children, so this is one pass down the graph.
+    let counts = crate::volume::plan(schema, &verdict.fillable, options.rows);
+
     for id in &verdict.fillable {
         let Some(table) = schema.get(id) else { continue };
+
+        let rows = counts.get(id).copied().unwrap_or(options.rows);
+        if rows == 0 {
+            // Nothing can be written — a parent came out empty, and inventing
+            // a key it does not have is the one thing not on offer.
+            continue;
+        }
+
         let columns = writable(table);
         if columns.is_empty() {
             // Every column is generated or defaulted, so the only thing to say
             // is "a row exists".
-            for _ in 0..options.rows {
+            for _ in 0..rows {
                 out.push(format!("INSERT INTO {} DEFAULT VALUES;", id.quoted()));
             }
             continue;
@@ -168,7 +181,11 @@ pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<
             names.join(", ")
         );
 
-        for row in 0..options.rows {
+        // Non-empty only for a join table, where the parents have to be walked
+        // as digits of one number so the combinations do not repeat.
+        let strides = crate::volume::strides(table, &counts);
+
+        for row in 0..rows {
             let mut values: Vec<String> = Vec::with_capacity(columns.len());
             let mut this_row: BTreeMap<String, Literal> = BTreeMap::new();
 
@@ -184,7 +201,8 @@ pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<
                 }
                 // One parent row per foreign key, so every column of a
                 // composite key comes from the same row.
-                let chosen = &parent_rows[row % parent_rows.len()];
+                let stride = strides.get(&fk.name).copied().unwrap_or(1);
+                let chosen = &parent_rows[(row / stride) % parent_rows.len()];
                 for (mine, theirs) in fk.columns.iter().zip(&fk.referenced_columns) {
                     if let Some(literal) = chosen.get(theirs) {
                         from_parent.insert(mine.clone(), literal.clone());
@@ -225,7 +243,7 @@ pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<
             statement.push_str(&format!(
                 "  ({}){}\n",
                 values.join(", "),
-                if row + 1 == options.rows { ";" } else { "," }
+                if row + 1 == rows { ";" } else { "," }
             ));
             written.push(this_row);
         }

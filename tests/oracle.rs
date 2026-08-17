@@ -298,3 +298,53 @@ fn a_cycle_broken_with_a_null_is_filled_in_afterwards() {
         .get(0);
     assert_eq!(roots, 1);
 }
+
+/// A unique column whose type has fewer values than the rows asked for.
+///
+/// Not a hypothetical: a `bool` holds two values and an enum holds as many as
+/// it was declared with. Asking for fifty distinct ones is not a hard problem,
+/// it is an impossible one, and the only honest answers are to write fewer
+/// rows or to refuse the table. Writing fifty and letting the database throw
+/// the lot out is the one answer that is definitely wrong.
+#[test]
+fn a_unique_column_cannot_hold_more_values_than_its_type_has() {
+    let (db, _) = seed(
+        "CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+         CREATE TABLE flags (id int PRIMARY KEY, on_off bool UNIQUE);
+         CREATE TABLE moods (id int PRIMARY KEY, m mood UNIQUE);",
+        20,
+    );
+    // Exactly the domain, not merely no more than it — `<=` would also pass
+    // on a table it gave up on and left empty, which is a different answer
+    // wearing the same number.
+    assert_eq!(count(&db, "flags"), 2, "a bool holds two rows, both of them");
+    assert_eq!(count(&db, "moods"), 3, "an enum of three labels holds three");
+}
+
+/// A join table can hold at most as many rows as there are pairs to join.
+#[test]
+fn a_join_table_cannot_have_more_rows_than_the_pairs_available() {
+    let (db, _) = seed(
+        "CREATE TABLE users (id int PRIMARY KEY);
+         CREATE TABLE roles (id int PRIMARY KEY, name bool UNIQUE);
+         CREATE TABLE grants (
+             user_id int REFERENCES users(id),
+             role_id int REFERENCES roles(id),
+             PRIMARY KEY (user_id, role_id)
+         );",
+        20,
+    );
+    // `roles.name` is a unique bool, so roles caps itself at 2 and that cap
+    // travels: 20 users x 2 roles is 40 pairs, of which 20 were asked for.
+    assert_eq!(count(&db, "users"), 20);
+    assert_eq!(count(&db, "roles"), 2, "the cap on a parent is the point");
+    assert_eq!(count(&db, "grants"), 20, "20 asked for, 40 available");
+
+    // And they are 20 *distinct* pairs, which is the thing the odometer buys.
+    let distinct: i64 = db
+        .client()
+        .query_one("SELECT count(*) FROM (SELECT DISTINCT user_id, role_id FROM grants) d", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(distinct, 20, "the pairs repeated");
+}

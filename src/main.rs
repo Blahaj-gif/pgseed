@@ -109,9 +109,19 @@ fn main() -> std::process::ExitCode {
     );
 
     if !verdict.fillable.is_empty() {
+        // With the row count beside each name, because it is not always the
+        // number that was asked for. A unique boolean holds two rows and a
+        // join table holds as many as it has pairs; getting two where fifty
+        // were requested should be visible rather than discovered later.
+        let counts = pgsow::volume::plan(&read, &verdict.fillable, args.rows);
         eprintln!("\n  would fill, in this order:");
         for id in &verdict.fillable {
-            eprintln!("    {id}");
+            let n = counts.get(id).copied().unwrap_or(args.rows);
+            if n == args.rows {
+                eprintln!("    {id:<32} {n}");
+            } else {
+                eprintln!("    {id:<32} {n}  (capped — no room for {})", args.rows);
+            }
         }
     }
 

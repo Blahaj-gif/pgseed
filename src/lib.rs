@@ -22,3 +22,4 @@ pub mod generate;
 pub mod graph;
 pub mod introspect;
 pub mod schema;
+pub mod volume;
