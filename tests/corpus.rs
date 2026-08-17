@@ -208,7 +208,7 @@ fn measure(name: &str, path: &Path) {
             Err(e) => {
                 rejected += 1;
                 let code = e.as_db_error().map_or("?".into(), |d| d.code().code().to_string());
-                *by_code.entry(code).or_insert(0usize) += 1;
+                *by_code.entry(code.clone()).or_insert(0usize) += 1;
                 // A CHECK violation is the one that matters: it is data that
                 // breaks a rule the schema stated, which is the exact failure
                 // this project was built to refuse rather than commit.
