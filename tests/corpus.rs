@@ -59,22 +59,55 @@ fn measure(name: &str, path: &Path) {
     let db = Db::start();
     let mut client = db.client();
     let (mut applied, mut skipped) = (0usize, 0usize);
+    let mut lost_constraints = 0usize;
 
     for statement in statements(&sql) {
         // Only the DDL that makes tables and constraints. Everything else in a
         // production dump is noise for this purpose.
         let head = statement.trim_start().to_uppercase();
+        // Functions and extensions are not the subject, but a column default
+        // that calls one takes its whole CREATE TABLE down with it, and a lost
+        // table is a table this never got to be measured against.
         if !(head.starts_with("CREATE TABLE")
             || head.starts_with("ALTER TABLE")
             || head.starts_with("CREATE TYPE")
             || head.starts_with("CREATE DOMAIN")
-            || head.starts_with("CREATE SEQUENCE"))
+            || head.starts_with("CREATE SEQUENCE")
+            || head.starts_with("CREATE FUNCTION")
+            || head.starts_with("CREATE OR REPLACE FUNCTION")
+            || head.starts_with("CREATE EXTENSION")
+            || head.starts_with("CREATE SCHEMA"))
         {
             continue;
         }
         match client.batch_execute(&statement) {
             Ok(()) => applied += 1,
-            Err(_) => skipped += 1,
+            Err(e) => {
+                skipped += 1;
+                // A skipped ALTER TABLE ADD CONSTRAINT means the schema in the
+                // database is *less* constrained than the real one, which would
+                // make reach look better than it is. Counted separately,
+                // because a measurement that flatters itself is worse than none.
+                // Two very different failures, and only one of them matters.
+                //
+                // A failed CREATE TABLE means the table is simply absent, so it
+                // never enters the denominator and reach stays honest.
+                //
+                // A failed ALTER TABLE ADD CONSTRAINT means the table IS here
+                // and is *less constrained than it really is* — which makes it
+                // look fillable when the real one might not be. That is the
+                // number that would flatter this measurement, so it is the one
+                // reported.
+                let head = statement.trim_start().to_uppercase();
+                if head.starts_with("ALTER TABLE") && head.contains("CONSTRAINT") {
+                    lost_constraints += 1;
+                    if lost_constraints <= 2 {
+                        let why = e.to_string();
+                        let why: String = why.chars().take(70).collect();
+                        eprintln!("      a table is under-constrained: {why}");
+                    }
+                }
+            }
         }
     }
 
@@ -97,7 +130,7 @@ fn measure(name: &str, path: &Path) {
     }
 
     println!(
-        "\n  {name}\n    {applied} statements applied, {skipped} skipped\n    \
+        "\n  {name}\n    {applied} applied, {skipped} skipped, {lost_constraints} of them constraints a live table has now lost\n    \
          {} tables · {} fillable · {} refused · REACH {:.0}%\n    \
          refused because: {checks} CHECK · {types} unsupported type · \
          {cycles} unbreakable cycle · {inherited} depends on a refused table",

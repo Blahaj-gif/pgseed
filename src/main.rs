@@ -11,7 +11,7 @@
 //! rescues it, and better to know on day one than in month three.
 
 use clap::Parser;
-use pgsow::{classify, graph, introspect};
+use pgsow::{classify, emit, graph, introspect};
 
 #[derive(Parser)]
 #[command(name = "pgsow", version, about =
@@ -24,6 +24,18 @@ struct Args {
     /// Schemas to read.
     #[arg(long, default_value = "public")]
     schema: Vec<String>,
+
+    /// Rows per table.
+    #[arg(long, default_value_t = 50)]
+    rows: usize,
+
+    /// Deterministic seed. The same seed and schema give byte-identical SQL.
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+
+    /// Report what would be filled, and generate nothing.
+    #[arg(long)]
+    plan: bool,
 }
 
 fn main() -> std::process::ExitCode {
@@ -48,7 +60,16 @@ fn main() -> std::process::ExitCode {
     let order = graph::order(&read);
     let verdict = classify::classify(&read, &order);
 
-    println!(
+    // The SQL goes to stdout so it can be piped, redirected or read. The
+    // report goes to stderr so that doing so does not mix prose into it.
+    if !args.plan {
+        print!("{}", emit::sql(&read, &verdict, &emit::Options {
+            seed: args.seed,
+            rows: args.rows,
+        }));
+    }
+
+    eprintln!(
         "pgsow: {} tables, {} fillable, {} refused ({:.0}% reach)",
         verdict.total(),
         verdict.fillable.len(),
@@ -59,7 +80,7 @@ fn main() -> std::process::ExitCode {
     if !verdict.fillable.is_empty() {
         println!("\n  would fill, in this order:");
         for id in &verdict.fillable {
-            println!("    {id}");
+            eprintln!("    {id}");
         }
     }
 
@@ -68,7 +89,7 @@ fn main() -> std::process::ExitCode {
         for (id, reasons) in &verdict.refused {
             for (n, reason) in reasons.iter().enumerate() {
                 let label = if n == 0 { id.to_string() } else { String::new() };
-                println!("    {label:<24} {}", reason.explain());
+                eprintln!("    {label:<24} {}", reason.explain());
             }
         }
     }
