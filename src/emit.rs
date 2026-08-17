@@ -96,12 +96,55 @@ fn borrow_from_database(
     )))
 }
 
-/// The SQL to fill everything the verdict said was fillable.
+/// The SQL to fill everything the verdict said was fillable, as one string.
+///
+/// Wrapped in a transaction, because a partial seed is worse than none: it
+/// looks like it worked.
 pub fn sql(schema: &Schema, verdict: &Verdict, options: &Options) -> String {
-    let mut out = String::new();
+    let mut out = String::from("BEGIN;\n");
+    for statement in statements(schema, verdict, options) {
+        out.push('\n');
+        out.push_str(&statement);
+        out.push('\n');
+    }
+    out.push_str("\nCOMMIT;\n");
+    out
+}
+
+/// Run everything against a database, inside one transaction.
+///
+/// All or nothing. A seed that stopped halfway leaves a database that looks
+/// populated and is not, which is the shape of failure this whole tool is
+/// built against.
+pub fn apply(
+    client: &mut postgres::Client,
+    schema: &Schema,
+    verdict: &Verdict,
+    options: &Options,
+) -> Result<usize, postgres::Error> {
+    let statements = statements(schema, verdict, options);
+    let mut transaction = client.transaction()?;
+    for statement in &statements {
+        transaction.batch_execute(statement)?;
+    }
+    transaction.commit()?;
+    Ok(statements.len())
+}
+
+/// Every statement needed, in order, without a transaction around them.
+///
+/// One implementation behind both the SQL text and the direct apply. Two would
+/// drift, and the one nobody tested would be the one somebody ran.
+pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
     let mut pool: KeyPool = BTreeMap::new();
 
-    out.push_str("BEGIN;\n");
+    // A cycle of deferrable keys is populated by holding the checks until
+    // commit. Postgres allows that only for constraints declared DEFERRABLE,
+    // which is why `graph` decides it and this only says it.
+    if verdict.deferred_constraints {
+        out.push("SET CONSTRAINTS ALL DEFERRED;".into());
+    }
 
     for id in &verdict.fillable {
         let Some(table) = schema.get(id) else { continue };
@@ -110,7 +153,7 @@ pub fn sql(schema: &Schema, verdict: &Verdict, options: &Options) -> String {
             // Every column is generated or defaulted, so the only thing to say
             // is "a row exists".
             for _ in 0..options.rows {
-                out.push_str(&format!("INSERT INTO {} DEFAULT VALUES;\n", id.quoted()));
+                out.push(format!("INSERT INTO {} DEFAULT VALUES;", id.quoted()));
             }
             continue;
         }
@@ -119,11 +162,11 @@ pub fn sql(schema: &Schema, verdict: &Verdict, options: &Options) -> String {
         let names: Vec<String> = columns.iter().map(|c| quote_ident(&c.name)).collect();
         let mut written: Vec<BTreeMap<String, Literal>> = Vec::new();
 
-        out.push_str(&format!(
-            "\nINSERT INTO {} ({}) VALUES\n",
+        let mut statement = format!(
+            "INSERT INTO {} ({}) VALUES\n",
             id.quoted(),
             names.join(", ")
-        ));
+        );
 
         for row in 0..options.rows {
             let mut values: Vec<String> = Vec::with_capacity(columns.len());
@@ -179,7 +222,7 @@ pub fn sql(schema: &Schema, verdict: &Verdict, options: &Options) -> String {
                 values.push(literal.0);
             }
 
-            out.push_str(&format!(
+            statement.push_str(&format!(
                 "  ({}){}\n",
                 values.join(", "),
                 if row + 1 == options.rows { ";" } else { "," }
@@ -187,10 +230,52 @@ pub fn sql(schema: &Schema, verdict: &Verdict, options: &Options) -> String {
             written.push(this_row);
         }
 
+        out.push(statement);
         pool.insert(id.clone(), written);
     }
 
-    out.push_str("\nCOMMIT;\n");
+    out.extend(repair_cycles(schema, verdict));
+    out
+}
+
+/// Fill in the keys that were left NULL to break a cycle.
+///
+/// `graph` breaks a cycle by inserting the row without its reference. Without
+/// this the column stays NULL forever, which is *valid* and useless: a
+/// `manager_id` that is null on every row has not modelled anything.
+///
+/// Every row but one is pointed at the lowest-keyed other row — stable,
+/// reproducible, never self-referential. The one left out is the root: a table
+/// where every row has a parent is a closed loop, which is exactly what the
+/// constraint existed to prevent.
+fn repair_cycles(schema: &Schema, verdict: &Verdict) -> Vec<String> {
+    let mut out = Vec::new();
+    for (table_id, constraint) in &verdict.deferred_repairs {
+        let Some(table) = schema.get(table_id) else { continue };
+        let Some(fk) = table.foreign_keys.iter().find(|f| f.name == *constraint) else {
+            continue;
+        };
+        // A composite repair needs its parent chosen as a row rather than
+        // column by column, and is left alone rather than done badly.
+        if fk.columns.len() != 1 || fk.referenced_columns.len() != 1 {
+            continue;
+        }
+        let Some(own) = table.primary_key().filter(|k| k.columns.len() == 1) else {
+            continue;
+        };
+
+        out.push(format!(
+            "UPDATE {child} AS c SET {column} = (SELECT p.{parent_column} \
+             FROM {parent} AS p WHERE p.{parent_column} <> c.{own_key} \
+             ORDER BY p.{parent_column} LIMIT 1) \
+             WHERE c.{own_key} <> (SELECT min(x.{own_key}) FROM {child} AS x);",
+            child = table_id.quoted(),
+            column = quote_ident(&fk.columns[0]),
+            parent = fk.references.quoted(),
+            parent_column = quote_ident(&fk.referenced_columns[0]),
+            own_key = quote_ident(&own.columns[0]),
+        ));
+    }
     out
 }
 

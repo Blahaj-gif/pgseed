@@ -36,6 +36,14 @@ struct Args {
     /// Report what would be filled, and generate nothing.
     #[arg(long)]
     plan: bool,
+
+    /// Write the rows into the database instead of printing SQL.
+    #[arg(long)]
+    apply: bool,
+
+    /// Empty the target tables first, in dependency order. Only with --apply.
+    #[arg(long)]
+    truncate: bool,
 }
 
 fn main() -> std::process::ExitCode {
@@ -60,13 +68,36 @@ fn main() -> std::process::ExitCode {
     let order = graph::order(&read);
     let verdict = classify::classify(&read, &order);
 
+    let options = emit::Options { seed: args.seed, rows: args.rows };
+
     // The SQL goes to stdout so it can be piped, redirected or read. The
     // report goes to stderr so that doing so does not mix prose into it.
-    if !args.plan {
-        print!("{}", emit::sql(&read, &verdict, &emit::Options {
-            seed: args.seed,
-            rows: args.rows,
-        }));
+    if args.apply {
+        if args.truncate && !verdict.fillable.is_empty() {
+            // Reverse dependency order, so a parent is never emptied while a
+            // child still points at it. CASCADE is deliberately not used: it
+            // would silently empty tables this was never asked to touch.
+            let names: Vec<String> = verdict
+                .fillable
+                .iter()
+                .rev()
+                .map(|id| id.quoted())
+                .collect();
+            if let Err(e) = client.batch_execute(&format!("TRUNCATE {};", names.join(", "))) {
+                eprintln!("pgsow: could not empty the tables first: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        }
+        match emit::apply(&mut client, &read, &verdict, &options) {
+            Ok(n) => eprintln!("pgsow: applied {n} statements"),
+            Err(e) => {
+                // The transaction rolled back, so the database is as it was.
+                eprintln!("pgsow: nothing was written — {e}");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    } else if !args.plan {
+        print!("{}", emit::sql(&read, &verdict, &options));
     }
 
     eprintln!(
@@ -78,14 +109,14 @@ fn main() -> std::process::ExitCode {
     );
 
     if !verdict.fillable.is_empty() {
-        println!("\n  would fill, in this order:");
+        eprintln!("\n  would fill, in this order:");
         for id in &verdict.fillable {
             eprintln!("    {id}");
         }
     }
 
     if !verdict.refused.is_empty() {
-        println!("\n  refused:");
+        eprintln!("\n  refused:");
         for (id, reasons) in &verdict.refused {
             for (n, reason) in reasons.iter().enumerate() {
                 let label = if n == 0 { id.to_string() } else { String::new() };

@@ -4,8 +4,14 @@
 data that satisfies it — or names the table it will not touch, and why.**
 
 ```
-pgsow --dsn postgres://localhost/mydb
+pgsow --dsn postgres://localhost/mydb            # SQL to stdout
+pgsow --dsn ... --apply --truncate               # straight into the database
+pgsow --dsn ... --plan                           # say what it would do, write nothing
 ```
+
+SQL goes to stdout and the report to stderr, so `pgsow --dsn ... > seed.sql`
+gives a file that runs. `--apply` writes inside one transaction: all of it, or
+none of it.
 
 No codegen step. No generated client. No API key. No runtime — one binary.
 

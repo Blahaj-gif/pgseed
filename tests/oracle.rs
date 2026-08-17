@@ -220,3 +220,81 @@ fn network_types_and_a_lowercase_constraint_round_trip() {
     );
     assert_eq!(count(&db, "hosts"), 20);
 }
+
+#[test]
+fn applying_directly_writes_the_same_rows_the_sql_would_have() {
+    // Two ways in, one implementation behind both. If they drifted, the one
+    // nobody tested would be the one somebody ran.
+    let ddl = "CREATE TABLE users (id int PRIMARY KEY, email text NOT NULL UNIQUE);
+               CREATE TABLE orders (
+                   id int PRIMARY KEY,
+                   user_id int NOT NULL REFERENCES users(id)
+               );";
+    let db = Db::start();
+    db.apply(ddl);
+
+    let mut client = db.client();
+    let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = graph::order(&schema);
+    let verdict = classify::classify(&schema, &order);
+    let options = emit::Options { seed: 3, rows: 12 };
+
+    emit::apply(&mut client, &schema, &verdict, &options).expect("apply failed");
+    assert_eq!(count(&db, "users"), 12);
+    assert_eq!(count(&db, "orders"), 12);
+}
+
+#[test]
+fn a_failed_apply_leaves_the_database_exactly_as_it_was() {
+    // All or nothing. A seed that stopped halfway leaves a database that looks
+    // populated and is not — the failure this tool is shaped against.
+    let db = Db::start();
+    db.apply("CREATE TABLE users (id int PRIMARY KEY, email text NOT NULL UNIQUE);");
+
+    let mut client = db.client();
+    let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = graph::order(&schema);
+    let verdict = classify::classify(&schema, &order);
+
+    // A row already sitting on the primary key this is about to generate.
+    db.client()
+        .batch_execute("INSERT INTO users (id, email) VALUES (0, 'taken@example.com');")
+        .unwrap();
+
+    let failed = emit::apply(&mut client, &schema, &verdict, &emit::Options { seed: 1, rows: 5 });
+    assert!(failed.is_err(), "a primary key collision should have failed");
+    assert_eq!(count(&db, "users"), 1, "the transaction did not roll back");
+}
+
+#[test]
+fn a_cycle_broken_with_a_null_is_filled_in_afterwards() {
+    // Breaking the cycle is not the end of the job. A `manager_id` that is
+    // null on every row is valid and has modelled nothing.
+    let db = Db::start();
+    db.apply(
+        "CREATE TABLE employees (
+             id         int PRIMARY KEY,
+             name       text NOT NULL,
+             manager_id int REFERENCES employees(id)
+         );",
+    );
+
+    let mut client = db.client();
+    let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = graph::order(&schema);
+    let verdict = classify::classify(&schema, &order);
+    emit::apply(&mut client, &schema, &verdict, &emit::Options { seed: 1, rows: 10 }).unwrap();
+
+    let with_manager: i64 = db.client()
+        .query_one("SELECT count(*) FROM employees WHERE manager_id IS NOT NULL", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(with_manager, 9, "every row but the root should report to somebody");
+
+    // And exactly one root, or it is a closed loop rather than a hierarchy.
+    let roots: i64 = db.client()
+        .query_one("SELECT count(*) FROM employees WHERE manager_id IS NULL", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(roots, 1);
+}

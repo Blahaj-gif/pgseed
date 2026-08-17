@@ -60,6 +60,13 @@ pub struct Verdict {
     pub fillable: Vec<TableId>,
     /// Tables that will not be, each with every reason found.
     pub refused: Vec<(TableId, Vec<Refusal>)>,
+    /// Whether any cycle is being populated by deferring its constraints to
+    /// commit, which the emitter has to say out loud in SQL.
+    pub deferred_constraints: bool,
+    /// Cycles broken by leaving a key NULL, as (table, constraint). The
+    /// emitter fills these in afterwards: a `manager_id` that is null on every
+    /// row is valid and has modelled nothing.
+    pub deferred_repairs: Vec<(TableId, String)>,
 }
 
 impl Verdict {
@@ -203,7 +210,22 @@ pub fn classify(schema: &Schema, order: &Order) -> Verdict {
         .cloned()
         .collect();
 
-    Verdict { fillable, refused: refusals }
+    // What the order decided about cycles, carried forward for the emitter.
+    let mut deferred_constraints = false;
+    let mut deferred_repairs = Vec::new();
+    for cycle in &order.cycles {
+        match &cycle.strategy {
+            crate::graph::CycleStrategy::Deferred { .. } => deferred_constraints = true,
+            crate::graph::CycleStrategy::NullThenUpdate { table, constraint } => {
+                if !refused_ids.contains(table) {
+                    deferred_repairs.push((table.clone(), constraint.clone()));
+                }
+            }
+            crate::graph::CycleStrategy::Impossible { .. } => {}
+        }
+    }
+
+    Verdict { fillable, refused: refusals, deferred_constraints, deferred_repairs }
 }
 
 #[cfg(test)]
