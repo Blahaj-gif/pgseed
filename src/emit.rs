@@ -220,7 +220,17 @@ pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<
             }
 
             for column in &columns {
-                let literal = if let Some(borrowed) = from_parent.get(&column.name) {
+                // An obligation to be null comes before everything, including
+                // the foreign key paths below. It used to come after them, so
+                // a column a CHECK required to be null was handed its parent's
+                // key anyway — which is how widening the closed set to
+                // `num_nonnulls(a, b) = 1` produced rows with two of them.
+                let literal = if bounds
+                    .get(&column.name)
+                    .is_some_and(|b: &Bounds| b.must_be_null)
+                {
+                    Literal::null()
+                } else if let Some(borrowed) = from_parent.get(&column.name) {
                     borrowed.clone()
                 } else if let Some(lookup) = borrow_from_database(table, column, row, schema)
                 {

@@ -59,6 +59,22 @@ pub enum Meaning {
     /// seven tables and it refused the entire schema — for a rule satisfied by
     /// generating a lowercase string, which everything here already does.
     Lowercase { column: String },
+    /// `num_nonnulls(a, b, ...) = 1` — exactly one of these columns holds a
+    /// value and the rest are NULL. GitLab's commonest unrecognised shape, at
+    /// 78 of the 277 this did not understand, and it is a *choice* rather than
+    /// a fact: one column is filled and the others are obliged to be null.
+    ExactlyOneNonNull { columns: Vec<String> },
+    /// `jsonb_typeof(col) = 'object'`, and the same for the other five JSON
+    /// types. Satisfied by generating a value of that shape, which needs no
+    /// understanding of the expression beyond the name of the type wanted.
+    JsonType { column: String, kind: String },
+    /// `octet_length(col) <= N`. A byte ceiling rather than the exact width
+    /// `ByteLength` records — every string this generates is ASCII, so a byte
+    /// is a character and the existing length machinery covers it.
+    ByteLimit { column: String, max: i32 },
+    /// `cardinality(col) <= N`. Every array this generates holds one element,
+    /// so any limit of 1 or more is already met.
+    CardinalityLimit { column: String, max: i32 },
     /// Anything at all that is not exactly one of the above.
     Unknown,
 }
@@ -111,6 +127,65 @@ fn column_name(text: &str) -> Option<String> {
         && text.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
         && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     ok.then(|| text.to_string())
+}
+
+/// The single argument of a call, if the text is exactly that call.
+///
+/// `char_length(name)` gives `name`; anything else, including a call with two
+/// arguments or a trailing operator, gives nothing.
+fn call_argument<'t>(text: &'t str, name: &str) -> Option<&'t str> {
+    let inner = unwrap_parens(text)
+        .strip_prefix(name)
+        .map(str::trim)?
+        .strip_prefix('(')?
+        .strip_suffix(')')?;
+    // No unbalanced parenthesis may remain, or `f(g(x)) + 1` would parse as a
+    // call on `g(x)) + 1`.
+    let mut depth = 0i32;
+    for ch in inner.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return None;
+        }
+    }
+    (depth == 0).then_some(inner)
+}
+
+/// A column name with the cast Postgres prints stripped: `(kroki_url)::text`
+/// is `kroki_url`. Without this, the same length limit written with a cast
+/// went unrecognised — nine of them in the corpus.
+fn column_cast(text: &str) -> Option<String> {
+    column_name(unwrap_parens(text).split("::").next()?.trim())
+}
+
+/// An integer bound, written `255` or `(255)::integer`.
+fn integer_bound(text: &str) -> Option<i64> {
+    unwrap_parens(unwrap_parens(text).split("::").next()?.trim())
+        .trim()
+        .parse::<i64>()
+        .ok()
+}
+
+/// Split on an operator only where it is the top-level one, so a comparison
+/// inside a call argument does not look like the comparison being matched.
+fn split_top<'t>(text: &'t str, operator: &str) -> Option<(&'t str, &'t str)> {
+    let mut depth = 0i32;
+    let bytes = text.as_bytes();
+    for index in 0..bytes.len() {
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if depth == 0 && text[index..].starts_with(operator) => {
+                return Some((&text[..index], &text[index + operator.len()..]));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Read a constraint definition, and say what it means only when that is
@@ -204,28 +279,80 @@ pub fn interpret(definition: &str) -> Meaning {
         }
     }
 
-    if let Some((left, right)) = expression.split_once("<=") {
-        let left = unwrap_parens(left);
+    // `f(col) <= N` for the three measuring functions. The bound is written
+    // `255` or `(255)::integer` depending on how it was declared; anything
+    // that is not a plain integer once the cast comes off is not a bound this
+    // understands.
+    if let Some((left, right)) = split_top(expression, "<=") {
+        let Some(max) = integer_bound(right).and_then(|n| i32::try_from(n).ok()) else {
+            return Meaning::Unknown;
+        };
         for call in ["char_length", "length"] {
-            let Some(inner) = left
-                .strip_prefix(call)
-                .map(str::trim)
-                .and_then(|s| s.strip_prefix('('))
-                .and_then(|s| s.strip_suffix(')'))
-            else {
-                continue;
-            };
-            let Some(column) = column_name(inner) else { continue };
-            // The bound is written `255` or `(255)::integer` depending on how
-            // it was declared. Anything that is not a plain integer after the
-            // cast is stripped is not a bound this understands.
-            let bound = unwrap_parens(right)
-                .split("::")
-                .next()
-                .map(|s| unwrap_parens(s).trim().to_string());
-            if let Some(max) = bound.and_then(|b| b.parse::<i32>().ok()) {
+            if let Some(column) = call_argument(left, call).and_then(column_cast) {
                 if max > 0 {
                     return Meaning::LengthLimit { column, max };
+                }
+            }
+        }
+        // A byte ceiling. Every string this generates is ASCII, so a byte is a
+        // character and the same limit does the job — which is what makes this
+        // provable rather than approximately right.
+        if let Some(column) = call_argument(left, "octet_length").and_then(column_cast) {
+            if max > 0 {
+                return Meaning::ByteLimit { column, max };
+            }
+        }
+        // Every array this generates holds exactly one element.
+        if let Some(column) = call_argument(left, "cardinality").and_then(column_cast) {
+            if max >= 1 {
+                return Meaning::CardinalityLimit { column, max };
+            }
+        }
+        return Meaning::Unknown;
+    }
+
+    // `num_nonnulls(a, b, ...) = 1` — exactly one of them holds a value.
+    //
+    // Only `= 1`. `<= 1` is satisfied by nulling all of them and `> 0` by
+    // filling all of them, and both are perfectly satisfiable, but they are
+    // different obligations and each needs its own shape rather than being
+    // folded in here on the grounds of looking similar.
+    if let Some((left, right)) = split_top(expression, "=") {
+        if !left.ends_with(['<', '>', '!']) && integer_bound(right) == Some(1) {
+            if let Some(arguments) = call_argument(left, "num_nonnulls") {
+                let columns: Vec<Option<String>> =
+                    arguments.split(',').map(column_cast).collect();
+                if columns.len() >= 2 && columns.iter().all(Option::is_some) {
+                    return Meaning::ExactlyOneNonNull {
+                        columns: columns.into_iter().flatten().collect(),
+                    };
+                }
+            }
+        }
+    }
+
+    // `jsonb_typeof(col) = 'object'`, and the five other JSON types.
+    if let Some((left, right)) = split_top(expression, "=") {
+        if !left.ends_with(['<', '>', '!']) {
+            for call in ["jsonb_typeof", "json_typeof"] {
+                let Some(column) = call_argument(left, call).and_then(column_cast) else {
+                    continue;
+                };
+                let literal = unwrap_parens(right).trim();
+                let literal = literal.split("::").next().unwrap_or("").trim();
+                let Some(kind) = literal
+                    .strip_prefix('\'')
+                    .and_then(|s| s.strip_suffix('\''))
+                else {
+                    continue;
+                };
+                if ["object", "array", "string", "number", "boolean", "null"]
+                    .contains(&kind)
+                {
+                    return Meaning::JsonType {
+                        column,
+                        kind: kind.to_string(),
+                    };
                 }
             }
         }
@@ -293,15 +420,95 @@ mod tests {
         // of them is approximated.
         for definition in [
             "CHECK (((total > 0) OR ((status)::text = 'void'::text)))",
-            "CHECK ((num_nonnulls(a, b) = 1))",
             "CHECK ((char_length(name) >= 3))",
             "CHECK ((char_length(a) <= char_length(b)))",
             "CHECK ((a IS NOT NULL) AND (b IS NOT NULL))",
             "CHECK ((starts_with(path, 'x'::text)))",
             "CHECK (((name)::text ~ '^[a-z]+$'::text))",
+            // The near misses of the shapes that *are* understood. Each is
+            // perfectly satisfiable and each is a different obligation, so
+            // each needs its own shape rather than being folded into a
+            // neighbour on the grounds of looking similar.
+            "CHECK ((num_nonnulls(a, b) <= 1))",
+            "CHECK ((num_nonnulls(a, b) > 0))",
+            "CHECK ((num_nonnulls(a, b) = 2))",
+            "CHECK ((num_nonnulls(a) = 1))",
+            "CHECK (((num_nonnulls(a, b) = 1) OR (num_nulls(a, b) = 2)))",
+            "CHECK ((num_nonnulls(a, lower(b)) = 1))",
+            "CHECK ((jsonb_typeof(payload) = 'wibble'::text))",
+            "CHECK ((jsonb_typeof(payload) <> 'object'::text))",
+            "CHECK ((cardinality(tags) <= 0))",
+            "CHECK ((octet_length(a) <= octet_length(b)))",
+            "CHECK ((char_length(name) <= 255) AND (char_length(name) >= 3))",
         ] {
             assert_eq!(interpret(definition), Meaning::Unknown, "{definition}");
         }
+    }
+
+    #[test]
+    fn exactly_one_of_a_group_is_recognised_and_keeps_the_declared_order() {
+        assert_eq!(
+            interpret("CHECK ((num_nonnulls(group_id, project_id) = 1))"),
+            Meaning::ExactlyOneNonNull {
+                columns: vec!["group_id".into(), "project_id".into()]
+            }
+        );
+        assert_eq!(
+            interpret("CHECK ((num_nonnulls(namespace_id, organization_id, project_id) = 1))"),
+            Meaning::ExactlyOneNonNull {
+                columns: vec![
+                    "namespace_id".into(),
+                    "organization_id".into(),
+                    "project_id".into(),
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn a_json_type_is_recognised_for_the_six_types_and_nothing_else() {
+        for kind in ["object", "array", "string", "number", "boolean", "null"] {
+            assert_eq!(
+                interpret(&format!("CHECK ((jsonb_typeof(filter) = '{kind}'::text))")),
+                Meaning::JsonType { column: "filter".into(), kind: kind.into() },
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_byte_ceiling_and_an_exact_byte_width_are_different_things() {
+        assert_eq!(
+            interpret("CHECK ((octet_length(iv) <= 12))"),
+            Meaning::ByteLimit { column: "iv".into(), max: 12 }
+        );
+        assert_eq!(
+            interpret("CHECK ((octet_length(sha) = 32))"),
+            Meaning::ByteLength { column: "sha".into(), exact: 32 }
+        );
+        // NOT VALID says nothing about the rows this is about to write.
+        assert_eq!(
+            interpret("CHECK ((octet_length(target_sha) <= 64)) NOT VALID"),
+            Meaning::ByteLimit { column: "target_sha".into(), max: 64 }
+        );
+    }
+
+    #[test]
+    fn a_length_limit_survives_the_cast_postgres_prints() {
+        // Nine constraints in the corpus were this shape and were refused for
+        // the parentheses alone.
+        assert_eq!(
+            interpret("CHECK ((char_length((kroki_url)::text) <= 1024))"),
+            Meaning::LengthLimit { column: "kroki_url".into(), max: 1024 }
+        );
+    }
+
+    #[test]
+    fn an_array_length_limit_is_met_by_the_one_element_this_writes() {
+        assert_eq!(
+            interpret("CHECK ((cardinality(links_to_spam) <= 20))"),
+            Meaning::CardinalityLimit { column: "links_to_spam".into(), max: 20 }
+        );
     }
 
     #[test]

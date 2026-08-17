@@ -27,6 +27,24 @@ use harness::Db;
 /// parts of a dump that are not DDL. Crude, and sufficient: a statement this
 /// mis-splits simply fails and is skipped, which costs one table out of
 /// hundreds rather than corrupting the measurement.
+/// Schemas a dump puts its tables in, so they can be created first.
+fn schemas_in(sql: &str) -> Vec<String> {
+    let mut schemas: std::collections::BTreeSet<String> = ["public".to_string()].into();
+    for line in sql.lines() {
+        for marker in ["CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "] {
+            if let Some(rest) = line.trim_start().strip_prefix(marker) {
+                if let Some((qualifier, _)) = rest.split_once('.') {
+                    let name = qualifier.trim().trim_matches('"');
+                    if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        schemas.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    schemas.into_iter().collect()
+}
+
 fn statements(sql: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
@@ -63,19 +81,7 @@ fn measure(name: &str, path: &Path) {
     // Hasura's lives in `hdb_catalog` and creates it elsewhere. Without this
     // every statement fails and the schema scores zero for a reason that has
     // nothing to do with the tool.
-    let mut schemas: std::collections::BTreeSet<String> = ["public".to_string()].into();
-    for line in sql.lines() {
-        for marker in ["CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "] {
-            if let Some(rest) = line.trim_start().strip_prefix(marker) {
-                if let Some((qualifier, _)) = rest.split_once('.') {
-                    let name = qualifier.trim().trim_matches('"');
-                    if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                        schemas.insert(name.to_string());
-                    }
-                }
-            }
-        }
-    }
+    let schemas = schemas_in(&sql);
     for name in &schemas {
         let _ = client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{name}\";"));
     }
@@ -269,4 +275,44 @@ fn reach_against_real_schemas() {
                  "postgrest", "synapse", "discourse", "gitlab"] {
         measure(name, &Path::new("tests/corpus").join(format!("{name}.sql")));
     }
+}
+
+/// Every CHECK constraint the closed set does not recognise, dumped verbatim.
+///
+/// Ignored by default: it is a survey rather than an assertion, and the point
+/// of it is to design the next widening of the closed set from what real
+/// schemas actually write instead of from what seems likely. Run with
+/// `cargo test --test corpus -- --ignored --nocapture survey`.
+#[test]
+#[ignore]
+fn survey_the_checks_this_does_not_understand() {
+    let (mut total, mut known) = (0usize, 0usize);
+    for name in ["powerdns", "hasura", "kong", "harbor", "temporal",
+                 "postgrest", "synapse", "discourse", "gitlab"] {
+        let path = Path::new("tests/corpus").join(format!("{name}.sql"));
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let db = Db::start();
+        let mut client = db.client();
+        for schema_name in schemas_in(&text) {
+            let _ = client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";"));
+        }
+        for statement in statements(&text) {
+            let _ = client.batch_execute(&statement);
+        }
+        let Ok(schema) = pgsow::introspect::read(&mut client, &schemas_in(&text)) else { continue };
+        for table in schema.tables.values() {
+            for check in &table.checks {
+                total += 1;
+                if matches!(
+                    pgsow::checks::interpret(&check.definition),
+                    pgsow::checks::Meaning::Unknown
+                ) {
+                    println!("UNKNOWN\t{}", check.definition.replace('\n', " "));
+                } else {
+                    known += 1;
+                }
+            }
+        }
+    }
+    println!("TOTALS	{total} checks, {known} understood, {} not", total - known);
 }

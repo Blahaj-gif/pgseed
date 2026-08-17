@@ -31,6 +31,8 @@ pub struct Bounds {
     pub exact_bytes: Option<i32>,
     pub min: Option<i64>,
     pub must_be_null: bool,
+    /// The JSON type the value has to be, from `jsonb_typeof(col) = 'object'`.
+    pub json_type: Option<String>,
     /// Every generated word is lowercase already, so this changes nothing
     /// today. It is recorded anyway: relying on a coincidence in a word list
     /// is not the same as honouring a constraint, and the day somebody adds
@@ -66,10 +68,73 @@ pub fn bounds_for(table: &Table) -> BTreeMap<String, Bounds> {
             Meaning::Lowercase { column } => {
                 out.entry(column).or_default().lowercase = true;
             }
-            Meaning::NotNull { .. } | Meaning::Unknown => {}
+            Meaning::ByteLimit { column, max } => {
+                // Every string this generates is ASCII, so a byte ceiling and
+                // a character ceiling are the same ceiling.
+                let entry = out.entry(column).or_default();
+                entry.max_length = Some(entry.max_length.map_or(max, |m: i32| m.min(max)));
+            }
+            Meaning::JsonType { column, kind } => {
+                out.entry(column).or_default().json_type = Some(kind);
+            }
+            Meaning::ExactlyOneNonNull { columns } => {
+                // One column carries the value and the rest are obliged to be
+                // null. Which one is decided by `filled_column` so that the
+                // classifier and this cannot disagree — if they did, the
+                // classifier would accept a table on the strength of a choice
+                // nobody made.
+                let keep = filled_column(table, &columns);
+                for column in columns {
+                    if Some(&column) != keep.as_ref() {
+                        out.entry(column).or_default().must_be_null = true;
+                    }
+                }
+            }
+            // Every array this generates holds one element, so any limit of
+            // one or more is already met and there is nothing to record.
+            Meaning::CardinalityLimit { .. }
+            | Meaning::NotNull { .. }
+            | Meaning::Unknown => {}
         }
     }
     out
+}
+
+/// Which column of a `num_nonnulls(...) = 1` group gets the value.
+///
+/// Decided in one place because two callers depend on the answer: the
+/// classifier, which has to know the choice is possible before accepting the
+/// table, and `bounds_for`, which nulls the others. A second implementation of
+/// this rule would eventually disagree with the first, and the table would be
+/// accepted on the strength of a choice that was never made.
+///
+/// A column the catalogue says is NOT NULL has no choice about holding a
+/// value, so it is the one. Otherwise a column with no foreign key on it,
+/// because that one certainly gets a value — an unmatched foreign key can
+/// still come out NULL, which would leave the count at zero. Failing both,
+/// the first, and the classifier decides whether that is good enough.
+pub fn filled_column(table: &Table, columns: &[String]) -> Option<String> {
+    let present: Vec<&String> = columns
+        .iter()
+        .filter(|c| table.column(c).is_some())
+        .collect();
+    let required: Vec<&&String> = present
+        .iter()
+        .filter(|c| !table.column(c).expect("present").nullable)
+        .collect();
+    if let [only] = required.as_slice() {
+        return Some((**only).clone());
+    }
+    if !required.is_empty() {
+        // Two columns that both must hold a value cannot have exactly one
+        // between them. There is no choice to make and the table is refused.
+        return None;
+    }
+    present
+        .iter()
+        .find(|c| !table.foreign_keys.iter().any(|fk| fk.columns.contains(c)))
+        .or_else(|| present.first())
+        .map(|c| (*c).clone())
 }
 
 /// A value, already rendered as the SQL literal that will carry it.
@@ -312,12 +377,30 @@ fn render(
 
         ColumnType::Interval => Literal::text(&format!("{} days", rng.gen_range(1..90))),
 
-        ColumnType::Json { .. } => Literal::text("{}"),
+        // `{}` unless a CHECK named the type it has to be. `jsonb_typeof` of
+        // each of these is exactly the word the constraint asked for, which is
+        // the whole of what has to be shown.
+        ColumnType::Json { .. } => Literal::text(match bounds.json_type.as_deref() {
+            Some("array") => "[]",
+            Some("string") => "\"alpha\"",
+            Some("number") => "0",
+            Some("boolean") => "true",
+            Some("null") => "null",
+            _ => "{}",
+        }),
 
         ColumnType::Bytea => {
             // A CHECK may pin the width exactly, which is what
             // `octet_length(col) = N` means and why it is recognised at all.
-            let width = bounds.exact_bytes.unwrap_or(8).clamp(0, 4096) as usize;
+            // An exact width if one was declared, otherwise eight — but never
+            // more than a byte ceiling allows, since `octet_length(col) <= N`
+            // is a real limit on a bytea and not only on text.
+            let ceiling = bounds.max_length.unwrap_or(i32::MAX);
+            let width = bounds
+                .exact_bytes
+                .unwrap_or(8)
+                .min(ceiling)
+                .clamp(0, 4096) as usize;
             let mut hex = String::with_capacity(width * 2);
             for _ in 0..width {
                 hex.push_str(&format!("{:02x}", rng.gen::<u8>()));

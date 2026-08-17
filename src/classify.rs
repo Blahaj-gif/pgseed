@@ -123,6 +123,32 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
             Meaning::MustBeNull { column } => {
                 table.column(&column).is_some_and(|c| c.nullable)
             }
+            // A byte ceiling is a length limit the generator honours; an array
+            // limit of one or more is already met, because every array this
+            // writes holds one element.
+            Meaning::ByteLimit { column, .. } => table.column(&column).is_some(),
+            Meaning::CardinalityLimit { column, max } => {
+                max >= 1 && table.column(&column).is_some()
+            }
+            // Only for a column that actually holds JSON. `jsonb_typeof` of
+            // anything else is a question this cannot answer by generating.
+            Meaning::JsonType { column, .. } => table
+                .column(&column)
+                .is_some_and(|c| matches!(c.type_, crate::schema::ColumnType::Json { .. })),
+            // Exactly one of these columns holds a value. Satisfiable when a
+            // column can be chosen to hold it and every other one may be null
+            // — two columns the catalogue insists on cannot have exactly one
+            // between them, and `filled_column` returns nothing to say so.
+            Meaning::ExactlyOneNonNull { columns } => {
+                let chosen = crate::generate::filled_column(table, &columns);
+                chosen.is_some_and(|keep| {
+                    columns.iter().all(|c| {
+                        table
+                            .column(c)
+                            .is_some_and(|col| *c == keep || col.nullable)
+                    })
+                })
+            }
             Meaning::Unknown => false,
         };
         if !satisfiable {
@@ -152,6 +178,20 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
     }
 
     out
+}
+
+/// Whether this foreign key holds the one value a `num_nonnulls(...) = 1`
+/// constraint on the table demands.
+fn fk_carries_the_only_value(table: &Table, fk: &crate::schema::ForeignKey) -> bool {
+    table.checks.iter().any(|check| {
+        let crate::checks::Meaning::ExactlyOneNonNull { columns } =
+            crate::checks::interpret(&check.definition)
+        else {
+            return false;
+        };
+        crate::generate::filled_column(table, &columns)
+            .is_some_and(|chosen| fk.columns.contains(&chosen))
+    })
 }
 
 /// Decide about every table.
@@ -188,6 +228,28 @@ pub fn classify(schema: &Schema, order: &Order) -> Verdict {
                 if fk.is_optional(table) || fk.references == *id {
                     continue;
                 }
+                // The column chosen to satisfy `num_nonnulls(...) = 1` has
+                // to be one that certainly gets a value. If it is a foreign
+                // key whose parent is refused there is no pool to draw from,
+                // it comes out NULL, and the count is zero rather than one.
+                // Nothing else refuses this table: the key is nullable, so it
+                // reads as optional, and the ordinary contagion below lets it
+                // through.
+                if fk_carries_the_only_value(table, fk)
+                    && (refused_ids.contains(&fk.references)
+                        || !schema.tables.contains_key(&fk.references))
+                {
+                    refusals.push((
+                        id.clone(),
+                        vec![Refusal::DependsOnRefused {
+                            table: fk.references.clone(),
+                            constraint: fk.name.clone(),
+                        }],
+                    ));
+                    added = true;
+                    break;
+                }
+
                 // A parent that was never read is not a free pass either. It
                 // may be in a schema nobody asked for, or a partitioned table
                 // introspection skips; either way there is no pool to draw

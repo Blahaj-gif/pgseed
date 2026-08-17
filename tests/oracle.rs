@@ -563,3 +563,83 @@ fn a_narrow_unique_column_is_not_quietly_overfilled() {
     // The same limit written as a CHECK is the same limit.
     assert_eq!(count(&db, "checked"), 50, "36 * 36 leaves room for fifty");
 }
+
+/// The shapes the closed set was widened to, judged by Postgres.
+///
+/// Each was chosen from a survey of what the nine real schemas actually write
+/// rather than from what seemed likely: `num_nonnulls(...) = 1` was 78 of the
+/// 277 constraints this did not understand, `jsonb_typeof` 53, a byte ceiling
+/// 37, an array length 19.
+#[test]
+fn the_widened_check_shapes_produce_rows_the_database_keeps() {
+    let (db, sql) = seed(
+        "CREATE TABLE owned (
+             id           int PRIMARY KEY,
+             group_id     int,
+             project_id   int,
+             CONSTRAINT one_owner CHECK ((num_nonnulls(group_id, project_id) = 1))
+         );
+         CREATE TABLE triple (
+             id              int PRIMARY KEY,
+             namespace_id    int,
+             organization_id int,
+             project_id      int,
+             CONSTRAINT one_of_three
+                 CHECK ((num_nonnulls(namespace_id, organization_id, project_id) = 1))
+         );
+         CREATE TABLE shapes (
+             id      int PRIMARY KEY,
+             filter  jsonb NOT NULL,
+             items   jsonb NOT NULL,
+             label   jsonb NOT NULL,
+             CONSTRAINT f_obj CHECK ((jsonb_typeof(filter) = 'object'::text)),
+             CONSTRAINT i_arr CHECK ((jsonb_typeof(items) = 'array'::text)),
+             CONSTRAINT l_str CHECK ((jsonb_typeof(label) = 'string'::text))
+         );
+         CREATE TABLE widths (
+             id    int PRIMARY KEY,
+             iv    bytea NOT NULL,
+             note  text NOT NULL,
+             tags  text[],
+             CONSTRAINT iv_max   CHECK ((octet_length(iv) <= 12)),
+             CONSTRAINT note_max CHECK ((octet_length(note) <= 6)),
+             CONSTRAINT tag_max  CHECK ((cardinality(tags) <= 20))
+         );",
+        20,
+    );
+    for table in ["owned", "triple", "shapes", "widths"] {
+        assert_eq!(count(&db, table), 20, "{table}");
+    }
+
+    // Postgres accepted them, so the constraints hold. This also checks the
+    // *choice* was made where it was supposed to be: the first column carries
+    // the value and the rest are null, rather than all of them being null and
+    // the constraint happening to be satisfied some other way.
+    let filled: i64 = db
+        .client()
+        .query_one("SELECT count(*) FROM owned WHERE group_id IS NOT NULL", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(filled, 20, "the chosen column should hold the value");
+    assert!(sql.contains("NULL"), "the others should be written null");
+}
+
+/// A group that cannot have exactly one non-null is refused, not attempted.
+#[test]
+fn two_columns_that_both_must_hold_a_value_cannot_have_one_between_them() {
+    let db = Db::start();
+    db.apply(
+        "CREATE TABLE impossible (
+             id int PRIMARY KEY,
+             a  int NOT NULL,
+             b  int NOT NULL,
+             CONSTRAINT one CHECK ((num_nonnulls(a, b) = 1))
+         );",
+    );
+    let mut client = db.client();
+    let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = graph::order(&schema);
+    let verdict = classify::classify(&schema, &order);
+    assert!(verdict.fillable.is_empty(), "there is no choice to make here");
+    assert!(verdict.refused[0].1[0].explain().contains("num_nonnulls"));
+}
