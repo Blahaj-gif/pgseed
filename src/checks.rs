@@ -42,6 +42,19 @@ pub enum Meaning {
     /// `col IS NOT NULL`. Already guaranteed: this never writes NULL into a
     /// column it is generating a value for.
     NotNull { column: String },
+    /// `octet_length(col) = N`. A fixed-width bytea — a hash, usually.
+    ByteLength { column: String, exact: i32 },
+    /// `(col IS NULL) OR <anything at all>`.
+    ///
+    /// The one rule here that needs no understanding of the expression it
+    /// appears in. A disjunction is satisfied by any one branch, and this
+    /// branch is reachable by writing NULL — so whatever the other half says,
+    /// however baroque, the constraint holds. It carries an obligation rather
+    /// than a permission: the column *must* be left NULL, and a caller that
+    /// ignores that has broken the guarantee rather than merely wasted it.
+    MustBeNull { column: String },
+    /// `col > N` or `col >= N` against a plain integer.
+    LowerBound { column: String, min: i64, inclusive: bool },
     /// Anything at all that is not exactly one of the above.
     Unknown,
 }
@@ -113,6 +126,57 @@ pub fn interpret(definition: &str) -> Meaning {
     if let Some(column) = expression.strip_suffix("IS NOT NULL").map(column_name) {
         if let Some(column) = column {
             return Meaning::NotNull { column };
+        }
+    }
+
+    // `(col IS NULL) OR ...` — satisfied by writing NULL, whatever follows.
+    // Matched only as the *leading* branch of a top-level disjunction, so that
+    // `a = 1 OR (b IS NULL)` cannot be read as licence to null out `b`.
+    if let Some(rest) = expression.strip_prefix('(') {
+        if let Some((first, tail)) = rest.split_once(')') {
+            if tail.trim_start().starts_with("OR ") {
+                if let Some(column) = first.strip_suffix("IS NULL").map(str::trim).map(column_name) {
+                    if let Some(column) = column {
+                        return Meaning::MustBeNull { column };
+                    }
+                }
+            }
+        }
+    }
+
+    // `octet_length(col) = N` — a fixed-width bytea, almost always a hash.
+    if let Some((left, right)) = expression.split_once('=') {
+        if !left.ends_with('<') && !left.ends_with('>') && !left.ends_with('!') {
+            if let Some(inner) = unwrap_parens(left)
+                .strip_prefix("octet_length")
+                .map(str::trim)
+                .and_then(|s| s.strip_prefix('('))
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                if let Some(column) = column_name(inner) {
+                    let bound = unwrap_parens(right).split("::").next()
+                        .map(|s| unwrap_parens(s).trim().to_string());
+                    if let Some(exact) = bound.and_then(|b| b.parse::<i32>().ok()) {
+                        if exact >= 0 {
+                            return Meaning::ByteLength { column, exact };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // `col > N` and `col >= N` against a plain integer literal.
+    for (operator, inclusive) in [(">=", true), (">", false)] {
+        let Some((left, right)) = expression.split_once(operator) else { continue };
+        if operator == ">" && right.starts_with('=') {
+            continue;                       // that was `>=`, handled above
+        }
+        let Some(column) = column_name(left) else { continue };
+        let bound = unwrap_parens(right).split("::").next()
+            .map(|s| unwrap_parens(s).trim().to_string());
+        if let Some(min) = bound.and_then(|b| b.parse::<i64>().ok()) {
+            return Meaning::LowerBound { column, min, inclusive };
         }
     }
 
@@ -204,10 +268,8 @@ mod tests {
         // The whole safety of this module. Each of these is refused, and none
         // of them is approximated.
         for definition in [
-            "CHECK ((total > (0)::numeric))",
             "CHECK (((total > 0) OR ((status)::text = 'void'::text)))",
             "CHECK ((num_nonnulls(a, b) = 1))",
-            "CHECK ((octet_length(file_sha1) = 20))",
             "CHECK ((char_length(name) >= 3))",
             "CHECK ((char_length(a) <= char_length(b)))",
             "CHECK ((a IS NOT NULL) AND (b IS NOT NULL))",
@@ -221,9 +283,18 @@ mod tests {
     #[test]
     fn a_disjunction_is_not_mistaken_for_its_first_half() {
         // The parenthesis stripper must not turn `(a) OR (b)` into `a) OR (b`
-        // and then match on the wreckage.
+        // and then match on the wreckage. This asserted `Unknown` when the
+        // closed set held two shapes; it is now a *nullable escape*, which is
+        // a different and stronger answer — writing NULL satisfies the whole
+        // disjunction — and the length limit in the second branch is still
+        // never evaluated.
         assert_eq!(
             interpret("CHECK (((file IS NULL) OR (char_length(file) <= 255)))"),
+            Meaning::MustBeNull { column: "file".into() }
+        );
+        // The wreckage case itself, with nothing matchable in either branch.
+        assert_eq!(
+            interpret("CHECK (((a = 1) OR (b = 2)))"),
             Meaning::Unknown
         );
     }
@@ -233,6 +304,66 @@ mod tests {
         // `char_length(x) <= 0` means the column must be empty, which is a
         // real rule and not one to treat as an ordinary limit.
         assert_eq!(interpret("CHECK ((char_length(name) <= 0))"), Meaning::Unknown);
+    }
+
+    #[test]
+    fn a_fixed_byte_length_is_recognised() {
+        // 85 of GitLab's constraints are this: a hash column pinned to width.
+        assert_eq!(
+            interpret("CHECK ((octet_length(file_sha1) = 20))"),
+            Meaning::ByteLength { column: "file_sha1".into(), exact: 20 }
+        );
+    }
+
+    #[test]
+    fn a_nullable_escape_is_taken_without_reading_the_other_branch() {
+        // The nicest rule here: a disjunction holds if ANY branch holds, and
+        // writing NULL reaches this one — so the other half can be arbitrarily
+        // baroque and it does not matter.
+        assert_eq!(
+            interpret("CHECK (((file_md5 IS NULL) OR (octet_length(file_md5) = 16)))"),
+            Meaning::MustBeNull { column: "file_md5".into() }
+        );
+        assert_eq!(
+            interpret("CHECK (((x IS NULL) OR (some_baroque_thing(x, y) ~ '^[a-z]+$')))"),
+            Meaning::MustBeNull { column: "x".into() }
+        );
+    }
+
+    #[test]
+    fn a_null_branch_that_is_not_the_leading_one_is_not_a_licence() {
+        // `a = 1 OR (b IS NULL)` does NOT mean b may be nulled: satisfying it
+        // that way requires knowing the first branch is false, which is
+        // exactly the reasoning this module refuses to do.
+        assert_eq!(interpret("CHECK (((a = 1) OR (b IS NULL)))"), Meaning::Unknown);
+    }
+
+    #[test]
+    fn a_conjunction_containing_is_null_is_not_a_disjunction() {
+        // `(a IS NULL) AND (b > 0)` still requires b > 0. Reading the AND as an
+        // OR would write NULL and leave the second half violated.
+        assert_eq!(interpret("CHECK (((a IS NULL) AND (b > 0)))"), Meaning::Unknown);
+    }
+
+    #[test]
+    fn a_lower_bound_on_a_plain_integer_is_recognised() {
+        assert_eq!(
+            interpret("CHECK ((size >= 0))"),
+            Meaning::LowerBound { column: "size".into(), min: 0, inclusive: true }
+        );
+        assert_eq!(
+            interpret("CHECK ((count > 0))"),
+            Meaning::LowerBound { column: "count".into(), min: 0, inclusive: false }
+        );
+    }
+
+    #[test]
+    fn a_bound_against_anything_but_a_literal_is_unknown() {
+        // `a > b` compares two columns, and `a > now()` is not a number at all.
+        assert_eq!(interpret("CHECK ((a > b))"), Meaning::Unknown);
+        assert_eq!(interpret("CHECK ((created_at > now()))"), Meaning::Unknown);
+        assert_eq!(interpret("CHECK ((total > (0)::numeric))"), Meaning::LowerBound {
+            column: "total".into(), min: 0, inclusive: false });
     }
 
     #[test]

@@ -92,14 +92,28 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
     // they are 81% of all the CHECK constraints there are. Everything else is
     // refused, unexamined and unapproximated. See `checks`.
     for check in &table.checks {
-        match crate::checks::interpret(&check.definition) {
-            crate::checks::Meaning::LengthLimit { ref column, .. }
-            | crate::checks::Meaning::NotNull { ref column }
-                if table.column(column).is_some() => {}
-            _ => out.push(Refusal::CheckConstraint {
+        use crate::checks::Meaning;
+        let satisfiable = match crate::checks::interpret(&check.definition) {
+            // Already true by construction, or a limit the generator honours.
+            Meaning::LengthLimit { column, .. }
+            | Meaning::NotNull { column }
+            | Meaning::ByteLength { column, .. }
+            | Meaning::LowerBound { column, .. } => table.column(&column).is_some(),
+            // An obligation rather than a permission: satisfied by writing
+            // NULL, and therefore only satisfiable if the column may BE null.
+            // A NOT NULL column carrying `(col IS NULL) OR ...` genuinely
+            // cannot take this way out, and accepting it would produce rows
+            // that violate the constraint the moment they are written.
+            Meaning::MustBeNull { column } => {
+                table.column(&column).is_some_and(|c| c.nullable)
+            }
+            Meaning::Unknown => false,
+        };
+        if !satisfiable {
+            out.push(Refusal::CheckConstraint {
                 name: check.name.clone(),
                 definition: check.definition.clone(),
-            }),
+            });
         }
     }
 
@@ -249,7 +263,7 @@ mod tests {
         let mut t = table("invoices", vec![col("total", ColumnType::Numeric { precision: None, scale: None }, false)]);
         t.checks.push(CheckConstraint {
             name: "invoices_total_positive".into(),
-            definition: "CHECK ((total > (0)::numeric))".into(),
+            definition: "CHECK ((num_nonnulls(a, b) = 1))".into(),
         });
         let v = verdict_for(&schema_of(vec![t]));
 
@@ -257,7 +271,7 @@ mod tests {
         let (_, reasons) = &v.refused[0];
         let text = reasons[0].explain();
         assert!(text.contains("invoices_total_positive"), "{text}");
-        assert!(text.contains("total > (0)::numeric"), "{text}");
+        assert!(text.contains("num_nonnulls"), "{text}");
     }
 
     #[test]
@@ -290,7 +304,7 @@ mod tests {
         let mut invoices = table("invoices", vec![col("total", int(), false)]);
         invoices.checks.push(CheckConstraint {
             name: "positive".into(),
-            definition: "CHECK ((total > 0))".into(),
+            definition: "CHECK ((num_nonnulls(a, b) = 1))".into(),
         });
 
         let mut orders = table("orders", vec![col("invoice_id", int(), false)]);
@@ -325,7 +339,7 @@ mod tests {
         let mut invoices = table("invoices", vec![col("total", int(), false)]);
         invoices.checks.push(CheckConstraint {
             name: "positive".into(),
-            definition: "CHECK ((total > 0))".into(),
+            definition: "CHECK ((num_nonnulls(a, b) = 1))".into(),
         });
 
         let mut orders = table("orders", vec![col("invoice_id", int(), true)]);
