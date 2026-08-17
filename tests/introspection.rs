@@ -99,15 +99,20 @@ fn a_check_constraint_arrives_with_its_expression_and_refuses_the_table() {
 #[test]
 fn a_check_outside_the_closed_set_refuses_its_table_against_a_real_database() {
     // The refusal path, on a constraint Postgres accepts and this will not
-    // pretend to satisfy. `num_nonnulls` requires exactly one of two columns
-    // to be set, which is a real rule with no closed form here.
+    // pretend to satisfy. A regular expression is a real rule with no closed
+    // form here: there is no way to show a generated string matches it short
+    // of implementing the language, which is exactly the expression evaluator
+    // this does not have.
+    //
+    // This was `num_nonnulls(user_id, group_id) = 1` until that shape was
+    // added to the closed set, at which point the table stopped being refused
+    // and the test said so rather than passing on a stale premise.
     let db = Db::start();
     db.apply(
         "CREATE TABLE targets (
-             id       int PRIMARY KEY,
-             user_id  int,
-             group_id int,
-             CONSTRAINT exactly_one_owner CHECK (num_nonnulls(user_id, group_id) = 1)
+             id   int PRIMARY KEY,
+             code text NOT NULL,
+             CONSTRAINT exactly_one_owner CHECK ((code ~ '^[A-Z]{3}-[0-9]{4}$'))
          );",
     );
 
@@ -119,11 +124,12 @@ fn a_check_outside_the_closed_set_refuses_its_table_against_a_real_database() {
     assert!(verdict.fillable.is_empty());
     assert!(verdict.refused[0].1[0].explain().contains("exactly_one_owner"));
 
-    // And the refusal is not timidity: writing both columns, which is what a
-    // generator filling every column would do, is rejected by Postgres.
-    let both = db.client().batch_execute(
-        "INSERT INTO targets (id, user_id, group_id) VALUES (1, 1, 1);");
-    assert!(both.is_err(), "the database should have rejected two owners");
+    // And the refusal is not timidity: an ordinary generated string, which is
+    // what filling this column without understanding the rule would produce,
+    // is rejected by Postgres.
+    let naive = db.client().batch_execute(
+        "INSERT INTO targets (id, code) VALUES (1, 'alpha');");
+    assert!(naive.is_err(), "the database should have rejected a plain word");
 }
 
 #[test]

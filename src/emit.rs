@@ -24,12 +24,24 @@ type KeyPool = BTreeMap<TableId, Vec<BTreeMap<String, Literal>>>;
 
 pub struct Options {
     pub seed: u64,
-    pub rows: usize,
+    /// Rows per table: one default and any number of per-table overrides, so
+    /// `--rows 50 --rows order_items=500` does what it looks like.
+    pub rows: crate::filter::RowCounts,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { seed: 1, rows: 50 }
+        Options { seed: 1, rows: crate::filter::RowCounts::default() }
+    }
+}
+
+impl Options {
+    /// A flat count for every table, which is what most callers want.
+    pub fn flat(seed: u64, rows: usize) -> Options {
+        Options {
+            seed,
+            rows: crate::filter::RowCounts::flat(rows),
+        }
     }
 }
 
@@ -153,12 +165,12 @@ pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<
     // How many rows each table gets: what was asked for, or as many as its
     // constraints leave room for. Not recomputed per table — a cap on a parent
     // caps its children, so this is one pass down the graph.
-    let counts = crate::volume::plan(schema, &verdict.fillable, options.rows);
+    let counts = crate::volume::plan(schema, &verdict.fillable, &options.rows);
 
     for id in &verdict.fillable {
         let Some(table) = schema.get(id) else { continue };
 
-        let rows = counts.get(id).copied().unwrap_or(options.rows);
+        let rows = counts.get(id).copied().unwrap_or_else(|| options.rows.for_table(id));
         if rows == 0 {
             // Nothing can be written — a parent came out empty, and inventing
             // a key it does not have is the one thing not on offer.
@@ -352,7 +364,7 @@ mod tests {
     fn render(s: &Schema, rows: usize) -> String {
         let order = graph::order(s);
         let verdict = classify::classify(s, &order);
-        sql(s, &verdict, &Options { seed: 1, rows })
+        sql(s, &verdict, &Options::flat(1, rows))
     }
 
     fn users_and_orders() -> Schema {

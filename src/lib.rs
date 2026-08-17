@@ -17,7 +17,9 @@
 
 pub mod checks;
 pub mod classify;
+pub mod dsn;
 pub mod emit;
+pub mod filter;
 pub mod generate;
 pub mod graph;
 pub mod introspect;

@@ -206,7 +206,7 @@ fn measure(name: &str, path: &Path) {
     // rows passed this gate while a `varchar(4)` unique column was still
     // colliding at fifty — the collision needed more rows than the gate was
     // asking for, which made the gate agree with itself and nothing else.
-    let options = pgsow::emit::Options { seed: 1, rows: 50 };
+    let options = pgsow::emit::Options::flat(1, 50);
     let statements = pgsow::emit::statements(&schema, &verdict, &options);
 
     let (mut accepted, mut rejected) = (0usize, 0usize);

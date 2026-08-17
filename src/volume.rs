@@ -84,12 +84,13 @@ pub fn capacity(table: &Table, written: &BTreeMap<TableId, usize>) -> Option<usi
 pub fn plan(
     schema: &crate::schema::Schema,
     order: &[TableId],
-    requested: usize,
+    requested: &crate::filter::RowCounts,
 ) -> BTreeMap<TableId, usize> {
     let mut counts: BTreeMap<TableId, usize> = BTreeMap::new();
     for id in order {
         let Some(table) = schema.get(id) else { continue };
-        let n = capacity(table, &counts).map_or(requested, |c| c.min(requested));
+        let asked = requested.for_table(id);
+        let n = capacity(table, &counts).map_or(asked, |c| c.min(asked));
         counts.insert(id.clone(), n);
     }
     counts

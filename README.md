@@ -15,6 +15,28 @@ none of it.
 
 No codegen step. No generated client. No API key. No runtime — one binary.
 
+### Options
+
+| | |
+|---|---|
+| `--dsn` / `$DATABASE_URL` | where the schema is read from |
+| `--schema NAME` | schemas to read, repeatable; default `public` |
+| `--rows N` | rows per table; default 50 |
+| `--rows TABLE=N` | override one, repeatable. Takes `*` and `?`; last match wins |
+| `--include` / `--exclude` | which tables to touch. `--exclude` wins on a conflict |
+| `--seed S` | same seed and schema give byte-identical SQL |
+| `--out FILE` | write the SQL here instead of stdout |
+| `--apply` | write the rows, in one transaction |
+| `--truncate` | empty the targets first, in dependency order. Never CASCADE |
+| `--allow-nonempty` | write even though the targets already hold rows |
+| `--remote` | write to a database that is not on this machine |
+
+The last two are the only guards, and both are questions rather than guesses.
+Reading a database name for the word `prod` stops nobody who called theirs
+`main` and annoys everybody whose local copy is called `myapp_production_dump`.
+So instead: **is the host this machine**, and **do the target tables already
+hold rows** — two facts a person can answer instantly and a tool cannot.
+
 ## Reach, on nine schemas nobody here wrote
 
 | schema | tables | fillable | reach |
@@ -27,8 +49,8 @@ No codegen step. No generated client. No API key. No runtime — one binary.
 | PostgREST *(test fixtures — deliberately awkward)* | 73 | 72 | 99% |
 | Synapse | 134 | 129 | 96% |
 | Discourse | 351 | 349 | 99% |
-| GitLab | 956 | 706 | 74% |
-| **total** | **1,590** | **1,329** | **84%** |
+| GitLab | 956 | 820 | 86% |
+| **total** | **1,590** | **1,443** | **91%** |
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. The corpus is deliberately not written here — a
@@ -41,8 +63,12 @@ It introspects, classifies, and **generates**. Point it at a database and it
 writes SQL; `--plan` reports what it would do and writes nothing.
 
 Every row it produces is checked by the only authority that matters: a test
-generates for each corpus schema, applies the result to a real Postgres, and
-fails if a single row is rejected.
+generates for each corpus schema at the default fifty rows, applies the result
+to a real Postgres, and fails if a single statement is rejected. It currently
+generates **1,352 statements across the nine schemas and Postgres accepts every
+one**. The gate is zero, not a percentage — the whole thesis is that the
+database adjudicates, so one row it refuses is a failure rather than a figure
+to be pleased with.
 
 ```
 pgsow: 14 tables, 12 fillable, 2 refused (86% reach)
@@ -71,10 +97,36 @@ The failure mode of a seed tool is not that it crashes. It is that it inserts
 plausible rows which quietly violate a rule nobody re-checked, and everything
 downstream is then tested against data the real system would have rejected.
 
-So a CHECK constraint is read, quoted, and **never solved**. A partial solver
-that silently handles `total > 0` but mishandles `total > 0 OR status =
-'void'` is worse than no solver at all, because the cases it gets wrong look
-exactly like the cases it gets right.
+So a CHECK constraint is **never evaluated**. There is no expression parser,
+no simplification and no reasoning about operators. A partial solver that
+silently handles `total > 0` but mishandles `total > 0 OR status = 'void'` is
+worse than no solver at all, because the cases it gets wrong look exactly like
+the cases it gets right.
+
+What there is instead is a **closed set of exact shapes**, each with a
+satisfaction that can be pointed at. A definition matches one of them
+structurally or it is unknown and its table is refused. The set was widened
+once, from a survey of all 277 constraints in the corpus that it did not
+understand — evidence rather than guesswork — and every near miss is tested to
+make sure it *stays* unknown. `num_nonnulls(a, b) <= 1` is satisfied by nulling
+both and `> 0` by filling both; both are perfectly satisfiable, both are
+different obligations, and neither is folded into `= 1` on the grounds of
+looking similar.
+
+| shape | how it is satisfied |
+|---|---|
+| `char_length(col) <= N` | what `varchar(N)` already means |
+| `col IS NOT NULL` | a column this never writes NULL into |
+| `octet_length(col) = N` / `<= N` | a fixed width, or a ceiling |
+| `col > N`, `col >= N` | a floor on the generated number |
+| `col = lower(col)` | every string generated is lowercase |
+| `col IS NULL OR …` | writing NULL satisfies the whole disjunction |
+| `num_nonnulls(a, b[, c]) = 1` | fill one, NULL the rest |
+| `jsonb_typeof(col) = 'object'` | emit a value of that type |
+| `cardinality(col) <= N` | every array written holds one element |
+
+Exclusion constraints are read as the checks they are and refuse. Not seeing a
+constraint is not the same as satisfying it.
 
 Three outcomes, never two: **filled · refused · could-not-read.**
 
@@ -92,7 +144,9 @@ prose.
 | Composite keys | referencing and referenced columns kept in declared order |
 | Types | integers, numerics with precision, text with declared length, uuid, dates, timestamps, json, bytea, enums with their labels, domains, arrays |
 | Generated & identity columns | left out of the insert entirely, not defaulted |
-| Refusal contagion | a table whose required key points at a refused table is refused too, all the way down |
+| Refusal contagion | a table whose required key points at a refused, or unread, table is refused too, all the way down |
+| Row counts | capped at what a table can hold — a `bool UNIQUE` holds two rows, a join table holds as many as it has pairs, and a cap on a parent caps its children |
+| Composite unique keys | one column varies, or where none has room to spare the columns are walked as digits of one number |
 
 ## Why this exists
 

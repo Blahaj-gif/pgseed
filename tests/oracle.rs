@@ -26,7 +26,7 @@ fn seed(ddl: &str, rows: usize) -> (Db, String) {
     let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
     let order = graph::order(&schema);
     let verdict = classify::classify(&schema, &order);
-    let sql = emit::sql(&schema, &verdict, &emit::Options { seed: 1, rows });
+    let sql = emit::sql(&schema, &verdict, &emit::Options::flat(1, rows));
 
     if let Err(e) = db.client().batch_execute(&sql) {
         panic!("Postgres rejected generated data — that is the whole failure this \
@@ -176,11 +176,15 @@ fn a_refused_table_is_left_completely_untouched() {
     // The doctrine, checked from the outside: a table this could not promise
     // to satisfy gets no rows at all, rather than a best effort.
     let (db, sql) = seed(
+        // A regular expression: a real rule with no closed form here, short of
+        // the expression evaluator this deliberately does not have. It was
+        // num_nonnulls until that shape joined the closed set, at which point
+        // this test stopped being about a refused table and said so.
         "CREATE TABLE ok (id int PRIMARY KEY, name text NOT NULL);
          CREATE TABLE targets (
              id int PRIMARY KEY,
-             user_id int, group_id int,
-             CONSTRAINT one_owner CHECK (num_nonnulls(user_id, group_id) = 1)
+             code text NOT NULL,
+             CONSTRAINT one_owner CHECK ((code ~ '^[A-Z]{3}-[0-9]{4}$'))
          );",
         10,
     );
@@ -237,7 +241,7 @@ fn applying_directly_writes_the_same_rows_the_sql_would_have() {
     let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
     let order = graph::order(&schema);
     let verdict = classify::classify(&schema, &order);
-    let options = emit::Options { seed: 3, rows: 12 };
+    let options = emit::Options::flat(3, 12);
 
     emit::apply(&mut client, &schema, &verdict, &options).expect("apply failed");
     assert_eq!(count(&db, "users"), 12);
@@ -261,7 +265,7 @@ fn a_failed_apply_leaves_the_database_exactly_as_it_was() {
         .batch_execute("INSERT INTO users (id, email) VALUES (0, 'taken@example.com');")
         .unwrap();
 
-    let failed = emit::apply(&mut client, &schema, &verdict, &emit::Options { seed: 1, rows: 5 });
+    let failed = emit::apply(&mut client, &schema, &verdict, &emit::Options::flat(1, 5));
     assert!(failed.is_err(), "a primary key collision should have failed");
     assert_eq!(count(&db, "users"), 1, "the transaction did not roll back");
 }
@@ -283,7 +287,7 @@ fn a_cycle_broken_with_a_null_is_filled_in_afterwards() {
     let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
     let order = graph::order(&schema);
     let verdict = classify::classify(&schema, &order);
-    emit::apply(&mut client, &schema, &verdict, &emit::Options { seed: 1, rows: 10 }).unwrap();
+    emit::apply(&mut client, &schema, &verdict, &emit::Options::flat(1, 10)).unwrap();
 
     let with_manager: i64 = db.client()
         .query_one("SELECT count(*) FROM employees WHERE manager_id IS NOT NULL", &[])
@@ -488,7 +492,7 @@ fn fourteen_tables_at_fifty_rows_generate_inside_the_budget() {
     let started = std::time::Instant::now();
     let order = graph::order(&schema);
     let verdict = classify::classify(&schema, &order);
-    let sql = emit::sql(&schema, &verdict, &emit::Options { seed: 1, rows: 50 });
+    let sql = emit::sql(&schema, &verdict, &emit::Options::flat(1, 50));
     let elapsed = started.elapsed();
 
     println!("  14 tables x 50 rows: {:?} for {} bytes", elapsed, sql.len());
@@ -518,7 +522,7 @@ fn adding_a_table_does_not_disturb_the_ones_already_there() {
         let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
         let order = graph::order(&schema);
         let verdict = classify::classify(&schema, &order);
-        emit::sql(&schema, &verdict, &emit::Options { seed: 7, rows: 12 })
+        emit::sql(&schema, &verdict, &emit::Options::flat(7, 12))
     };
 
     let before = render(base);
