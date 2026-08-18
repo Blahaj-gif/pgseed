@@ -53,6 +53,11 @@ def fetch_directory(schema):
     """Concatenate every matching file in a migrations directory."""
     repo, path = schema["repo"], schema["path"]
     suffix = schema.get("suffix", ".sql")
+    # Projects that keep one file per dialect often name the shared one plainly
+    # and the others `.cockroach.up.sql`, `.mysql.up.sql`. The suffix alone
+    # cannot tell them apart, so the ones to leave out are named.
+    excluded = schema.get("exclude", [])
+    keep = lambda name: name.endswith(suffix) and not any(x in name for x in excluded)
     parts = []
     for name, kind, url in listing(repo, path):
         if kind == "dir":
@@ -62,9 +67,9 @@ def fetch_directory(schema):
             if not schema.get("nested"):
                 continue
             for inner_name, inner_kind, inner_url in listing(repo, f"{path}/{name}"):
-                if inner_kind == "file" and inner_name.endswith(suffix):
+                if inner_kind == "file" and keep(inner_name):
                     parts.append((f"{name}/{inner_name}", inner_url))
-        elif name.endswith(suffix):
+        elif keep(name):
             parts.append((name, url))
 
     out = []

@@ -403,6 +403,10 @@ fn reach_against_real_schemas() {
         ("mattermost", 3),
         ("vaultwarden", 0),
         ("kratos", 0),
+        // Configured, and skipped cleanly until it is fetched — the listing
+        // API allows sixty calls an hour without a token and they were spent
+        // finding these.
+        ("hydra", 99),
     ] {
         measure(name, &Path::new("tests/corpus").join(format!("{name}.sql")), max_lost);
     }
@@ -419,7 +423,10 @@ fn reach_against_real_schemas() {
 fn survey_the_checks_this_does_not_understand() {
     let (mut total, mut known) = (0usize, 0usize);
     for name in ["powerdns", "hasura", "kong", "harbor", "temporal",
-                 "postgrest", "synapse", "discourse", "gitlab"] {
+                 "postgrest", "synapse", "discourse", "gitlab",
+                 "lago", "sourcegraph", "sourcegraph_codeintel",
+                 "sourcegraph_insights", "plausible", "hexpm",
+                 "mattermost", "vaultwarden", "kratos"] {
         let path = Path::new("tests/corpus").join(format!("{name}.sql"));
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
         let db = Db::start();

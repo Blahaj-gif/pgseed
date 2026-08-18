@@ -132,6 +132,15 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
             // limit of one or more is already met, because every array this
             // writes holds one element.
             Meaning::ByteLimit { column, .. } => table.column(&column).is_some(),
+            // Every value this generates is at least one character long, so a
+            // column that must not be empty already is not.
+            Meaning::NonEmpty { column } => table.column(&column).is_some(),
+            // At least one of them holds a value, and all of them are filled
+            // unless a foreign key had nowhere to point. One that certainly
+            // gets a value is enough, and `filled_column` finds it.
+            Meaning::AtLeastOneNonNull { columns } => {
+                crate::generate::filled_column(table, &columns).is_some()
+            }
             Meaning::CardinalityLimit { column, max } => {
                 max >= 1 && table.column(&column).is_some()
             }
@@ -192,6 +201,53 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
     out
 }
 
+/// Where an at-least-one-non-null group has no column that can hold a value.
+///
+/// Every column of the group is a foreign key, and every one of those parents
+/// is refused or was never read — so all of them are written NULL and the
+/// constraint has nothing to be satisfied by. Returns the last such parent, to
+/// name in the refusal.
+///
+/// One column that is not a foreign key is enough to make the group fine,
+/// because the generator always produces a value for one of those.
+fn every_choice_is_blocked(
+    table: &Table,
+    schema: &Schema,
+    refused: &[TableId],
+) -> Option<(TableId, String)> {
+    for check in &table.checks {
+        let crate::checks::Meaning::AtLeastOneNonNull { columns } =
+            crate::checks::interpret(&check.definition)
+        else {
+            continue;
+        };
+        let mut blocking = None;
+        for column in &columns {
+            let Some(fk) = table
+                .foreign_keys
+                .iter()
+                .find(|fk| fk.columns.contains(column))
+            else {
+                // Not a foreign key, so it certainly gets a value.
+                blocking = None;
+                break;
+            };
+            if !(refused.contains(&fk.references)
+                || !schema.tables.contains_key(&fk.references))
+            {
+                // This parent is fillable, so this column will hold something.
+                blocking = None;
+                break;
+            }
+            blocking = Some((fk.references.clone(), fk.name.clone()));
+        }
+        if blocking.is_some() {
+            return blocking;
+        }
+    }
+    None
+}
+
 /// Whether this foreign key holds the one value a `num_nonnulls(...) = 1`
 /// constraint on the table demands.
 fn fk_carries_the_only_value(table: &Table, fk: &crate::schema::ForeignKey) -> bool {
@@ -234,6 +290,24 @@ pub fn classify(schema: &Schema, order: &Order) -> Verdict {
             if refused_ids.contains(id) {
                 continue;
             }
+            // `(a IS NOT NULL) OR (b IS NOT NULL)` needs only one of them to
+            // hold a value — but if every one is a foreign key and every one
+            // of those parents is refused, they all come out NULL and none
+            // does. Weaker than the exactly-one rule below and checked over
+            // the whole group rather than one key at a time, because one
+            // survivor is enough.
+            if let Some(blocking) = every_choice_is_blocked(table, schema, &refused_ids) {
+                refusals.push((
+                    id.clone(),
+                    vec![Refusal::DependsOnRefused {
+                        table: blocking.0,
+                        constraint: blocking.1,
+                    }],
+                ));
+                added = true;
+                continue;
+            }
+
             for fk in &table.foreign_keys {
                 if fk.references == *id {
                     continue;

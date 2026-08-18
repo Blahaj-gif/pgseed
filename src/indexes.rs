@@ -179,6 +179,41 @@ fn lower_argument(text: &str) -> Option<&str> {
     (depth == 0).then_some(inner)
 }
 
+/// Strip the per-column modifiers an index key may carry.
+///
+/// `lower(email) text_pattern_ops`, `created_at DESC NULLS LAST`. An operator
+/// class chooses which comparison functions the index uses and an ordering
+/// says which way it is stored; neither says anything whatever about what may
+/// be written. Only *known* modifiers are stripped — the ordering keywords and
+/// a trailing word ending in `_ops`, which is the naming convention Postgres
+/// uses for every one of them. Stripping any trailing word would eat the
+/// `zone` from `(a)::timestamp with time zone`.
+fn strip_modifiers(part: &str) -> &str {
+    let mut text = part.trim();
+    loop {
+        let upper = text.to_ascii_uppercase();
+        let trimmed = ["NULLS FIRST", "NULLS LAST", "ASC", "DESC"]
+            .iter()
+            .find(|suffix| upper.ends_with(*suffix))
+            .map(|suffix| text[..text.len() - suffix.len()].trim());
+        if let Some(shorter) = trimmed {
+            text = shorter;
+            continue;
+        }
+        let opclass = text
+            .rsplit_once(char::is_whitespace)
+            .filter(|(_, last)| {
+                last.ends_with("_ops")
+                    && last.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+            .map(|(head, _)| head.trim());
+        match opclass {
+            Some(shorter) => text = shorter,
+            None => return text,
+        }
+    }
+}
+
 /// Read what an index requires, from the text `pg_get_indexdef` returned.
 pub fn interpret(definition: &str) -> Requirement {
     let Some(keys) = key_list(definition) else {
@@ -188,6 +223,7 @@ pub fn interpret(definition: &str) -> Requirement {
     let mut columns = Vec::new();
     let mut lowered = Vec::new();
     for part in top_level_parts(keys) {
+        let part = strip_modifiers(part);
         if let Some(name) = column(part) {
             columns.push(name);
             continue;
@@ -293,6 +329,50 @@ mod tests {
                 columns: vec!["a".into(), "b".into()],
                 lowered: vec!["a".into(), "b".into()],
             }
+        );
+    }
+
+    #[test]
+    fn an_operator_class_or_an_ordering_is_not_part_of_the_key() {
+        // Both choose how the index is built and neither says anything about
+        // what may be written. Seven of these in the corpus were refusing
+        // their tables over a tuning decision.
+        assert_eq!(
+            on("CREATE INDEX i ON t USING btree (name text_pattern_ops)"),
+            columns(&["name"])
+        );
+        assert_eq!(
+            on("CREATE UNIQUE INDEX i ON t USING btree (a, b varchar_pattern_ops)"),
+            columns(&["a", "b"])
+        );
+        assert_eq!(
+            on("CREATE INDEX i ON t USING btree (created_at DESC NULLS LAST)"),
+            columns(&["created_at"])
+        );
+        assert_eq!(
+            on("CREATE INDEX i ON t USING btree (lower((email)::text) text_pattern_ops)"),
+            Requirement::Lowered {
+                columns: vec!["email".into()],
+                lowered: vec!["email".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_type_name_with_spaces_is_not_mistaken_for_a_modifier() {
+        // A cast to a multi-word type is still just the column, and the
+        // modifier stripper must not take the `zone` for an operator class.
+        // Only words ending in `_ops` are stripped, which is why it does not.
+        //
+        // This test first asserted `Unknown`, which was wrong about the code
+        // rather than the other way round.
+        assert_eq!(
+            on("CREATE INDEX i ON t USING btree (((a)::timestamp with time zone))"),
+            columns(&["a"])
+        );
+        assert_eq!(
+            on("CREATE INDEX i ON t USING btree (((a)::timestamp with time zone) DESC)"),
+            columns(&["a"])
         );
     }
 

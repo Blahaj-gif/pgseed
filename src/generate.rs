@@ -92,7 +92,13 @@ pub fn bounds_for(table: &Table) -> BTreeMap<String, Bounds> {
             }
             // Every array this generates holds one element, so any limit of
             // one or more is already met and there is nothing to record.
+            // Nothing to record for any of these. An array limit of one or
+            // more is already met because every array written holds one
+            // element; a non-empty column already is; and at-least-one is
+            // satisfied by filling all of them, which is what happens.
             Meaning::CardinalityLimit { .. }
+            | Meaning::NonEmpty { .. }
+            | Meaning::AtLeastOneNonNull { .. }
             | Meaning::NotNull { .. }
             | Meaning::Unknown => {}
         }

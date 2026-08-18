@@ -158,6 +158,23 @@
       "suffix": ".postgres.up.sql",
       "url": "https://github.com/ory/kratos/tree/master/persistence/sql/migrations/sql",
       "notes": "Identity management, written dialect-by-dialect \u2014 the Postgres files only."
+    },
+    {
+      "name": "hydra",
+      "file": "hydra.sql",
+      "project": "ory/hydra",
+      "licence": "Apache-2.0",
+      "kind": "directory",
+      "repo": "ory/hydra",
+      "path": "persistence/sql/migrations",
+      "suffix": ".up.sql",
+      "exclude": [
+        ".cockroach.",
+        ".mysql.",
+        ".sqlite."
+      ],
+      "url": "https://github.com/ory/hydra/tree/master/persistence/sql/migrations",
+      "notes": "OAuth2 server. Written dialect by dialect, with the shared files named plainly \u2014 which is why the fetcher can exclude as well as match."
     }
   ]
 }

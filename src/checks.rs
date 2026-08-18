@@ -75,6 +75,14 @@ pub enum Meaning {
     /// `cardinality(col) <= N`. Every array this generates holds one element,
     /// so any limit of 1 or more is already met.
     CardinalityLimit { column: String, max: i32 },
+    /// `col <> ''`. Not "different from some value" — different from the
+    /// *empty string* specifically, which every value this generates already
+    /// is. The commonest unrecognised shape across eighteen schemas, at 20.
+    NonEmpty { column: String },
+    /// `(a IS NOT NULL) OR (b IS NOT NULL)` — at least one holds a value.
+    /// Weaker than `ExactlyOneNonNull` and satisfied by filling all of them,
+    /// which is what happens anyway.
+    AtLeastOneNonNull { columns: Vec<String> },
     /// Anything at all that is not exactly one of the above.
     Unknown,
 }
@@ -345,6 +353,66 @@ pub fn interpret(definition: &str) -> Meaning {
         }
     }
 
+    // `col <> ''` — a column that must not be the empty string. Every value
+    // this generates is at least one character, so it holds by construction.
+    // Only against the empty string: `col <> 'draft'` is a different rule
+    // that happens to look the same, and nothing here can satisfy it.
+    if let Some((left, right)) = split_top(expression, "<>") {
+        if let Some(column) = column_cast(left) {
+            let literal = unwrap_parens(right).trim();
+            let literal = literal.split("::").next().unwrap_or("").trim();
+            if literal == "''" {
+                return Meaning::NonEmpty { column };
+            }
+        }
+    }
+
+    // Two more spellings of exactly-one-non-null. `(a IS NULL) <> (b IS NULL)`
+    // says the two differ in their nullness, which for two columns is the same
+    // obligation `num_nonnulls(a, b) = 1` states. GitLab writes it both ways
+    // and Lago prefers this one; 15 across the corpus.
+    if let Some((left, right)) = split_top(expression, "<>") {
+        for suffix in ["IS NULL", "IS NOT NULL"] {
+            let both = [left, right].map(|side| {
+                unwrap_parens(side.trim())
+                    .strip_suffix(suffix)
+                    .map(str::trim)
+                    .and_then(column_cast)
+            });
+            // `IS NOT NULL` also ends with `IS NULL` read naively, so the
+            // NOT form has to be ruled out before the plain one matches.
+            let plain_form_is_really_the_not_form = suffix == "IS NULL"
+                && [left, right]
+                    .iter()
+                    .any(|side| unwrap_parens(side.trim()).ends_with("IS NOT NULL"));
+            if let [Some(a), Some(b)] = both {
+                if a != b && !plain_form_is_really_the_not_form {
+                    return Meaning::ExactlyOneNonNull { columns: vec![a, b] };
+                }
+            }
+        }
+    }
+
+    // `(a IS NOT NULL) OR (b IS NOT NULL)` — at least one of them holds a
+    // value, which filling all of them satisfies.
+    if expression.contains(" OR ") {
+        let parts: Vec<&str> = expression.split(" OR ").collect();
+        let columns: Vec<Option<String>> = parts
+            .iter()
+            .map(|part| {
+                unwrap_parens(part.trim())
+                    .strip_suffix("IS NOT NULL")
+                    .map(str::trim)
+                    .and_then(column_cast)
+            })
+            .collect();
+        if columns.len() >= 2 && columns.iter().all(Option::is_some) {
+            return Meaning::AtLeastOneNonNull {
+                columns: columns.into_iter().flatten().collect(),
+            };
+        }
+    }
+
     // `jsonb_typeof(col) = 'object'`, and the five other JSON types.
     if let Some((left, right)) = split_top(expression, "=") {
         if !left.ends_with(['<', '>', '!']) {
@@ -457,6 +525,63 @@ mod tests {
         ] {
             assert_eq!(interpret(definition), Meaning::Unknown, "{definition}");
         }
+    }
+
+    #[test]
+    fn not_the_empty_string_is_understood_and_not_the_other_value_is_not() {
+        assert_eq!(
+            interpret("CHECK ((name <> ''::text))"),
+            Meaning::NonEmpty { column: "name".into() }
+        );
+        assert_eq!(
+            interpret("CHECK (((name)::text <> ''::text))"),
+            Meaning::NonEmpty { column: "name".into() }
+        );
+        // A different value is a different rule that happens to look alike.
+        assert_eq!(interpret("CHECK ((status <> 'draft'::text))"), Meaning::Unknown);
+        assert_eq!(interpret("CHECK ((a <> b))"), Meaning::Unknown);
+    }
+
+    #[test]
+    fn the_two_other_spellings_of_exactly_one_are_read_as_the_same_rule() {
+        // GitLab writes num_nonnulls; Lago prefers this. Same obligation.
+        assert_eq!(
+            interpret("CHECK (((project_id IS NULL) <> (namespace_id IS NULL)))"),
+            Meaning::ExactlyOneNonNull {
+                columns: vec!["project_id".into(), "namespace_id".into()]
+            }
+        );
+        assert_eq!(
+            interpret("CHECK (((plan_id IS NOT NULL) <> (subscription_id IS NOT NULL)))"),
+            Meaning::ExactlyOneNonNull {
+                columns: vec!["plan_id".into(), "subscription_id".into()]
+            }
+        );
+        // The same column on both sides says nothing, and must not be read as
+        // an obligation to null one of them.
+        assert_eq!(interpret("CHECK (((a IS NULL) <> (a IS NULL)))"), Meaning::Unknown);
+    }
+
+    #[test]
+    fn at_least_one_is_weaker_than_exactly_one_and_kept_separate() {
+        assert_eq!(
+            interpret("CHECK (((a IS NOT NULL) OR (b IS NOT NULL)))"),
+            Meaning::AtLeastOneNonNull {
+                columns: vec!["a".into(), "b".into()]
+            }
+        );
+        assert_eq!(
+            interpret("CHECK (((a IS NOT NULL) OR (b IS NOT NULL) OR (c IS NOT NULL)))"),
+            Meaning::AtLeastOneNonNull {
+                columns: vec!["a".into(), "b".into(), "c".into()]
+            }
+        );
+        // A disjunction with anything else in it is not this shape. The first
+        // branch being `IS NULL` is a *nullable escape* and is read as one.
+        assert_eq!(
+            interpret("CHECK (((a IS NOT NULL) OR (b > 0)))"),
+            Meaning::Unknown
+        );
     }
 
     #[test]
