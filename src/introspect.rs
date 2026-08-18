@@ -190,7 +190,12 @@ const PARTITIONS_SQL: &str = "
            (SELECT count(*)
               FROM pg_inherits i
               JOIN pg_constraint con ON con.conrelid = i.inhrelid
-             WHERE i.inhparent = c.oid AND con.contype = 'c') AS own_rules
+             WHERE i.inhparent = c.oid AND con.contype = 'c'
+               -- Locally defined only. Postgres copies a parent's CHECK down
+               -- to every partition, and `coninhcount > 0` marks those — they
+               -- are the parent's rule, already read, not a new one the
+               -- partition adds.
+               AND con.coninhcount = 0) AS own_rules
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE c.relkind = 'p'
@@ -524,6 +529,53 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
         }
     }
 
+    for row in client.query(CONSTRAINTS_SQL, &[&schemas])? {
+        let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
+        let Some(table) = schema.tables.get_mut(&id) else {
+            continue;
+        };
+
+        let name: String = row.get("conname");
+        let kind = row.get::<_, i8>("contype") as u8 as char;
+        let columns: Vec<String> = row.try_get("columns").unwrap_or_default();
+
+        match kind {
+            'p' | 'u' => table.unique_keys.push(UniqueKey {
+                name,
+                columns,
+                is_primary: kind == 'p',
+            }),
+            'f' => {
+                let ref_schema: Option<String> = row.get("ref_schema");
+                let ref_table: Option<String> = row.get("ref_table");
+                if let (Some(s), Some(t)) = (ref_schema, ref_table) {
+                    table.foreign_keys.push(ForeignKey {
+                        name,
+                        columns,
+                        references: TableId::new(s, t),
+                        referenced_columns: row.try_get("ref_columns").unwrap_or_default(),
+                        deferrable: row.get::<_, bool>("condeferrable"),
+                    });
+                }
+            }
+            // An exclusion constraint is read as a check, which is what it is:
+            // a rule over the row that this cannot prove it satisfies. GitLab
+            // has four, and two of them build `daterange(start_date, due_date)`
+            // out of two columns generated independently — so half the time
+            // the range came out backwards. Not seeing a constraint is not the
+            // same as satisfying it.
+            'c' | 'x' => table.checks.push(CheckConstraint {
+                name,
+                definition: row.get("definition"),
+            }),
+            _ => {}
+        }
+    }
+
+    // Triggers last: whether one interferes depends on which columns are
+    // written, and that depends on the unique keys, which arrive with the
+    // constraints above. Reading them earlier meant asking the question before
+    // the answer existed.
     let mut written_by_triggers: Vec<(String, String, TableId)> = Vec::new();
     for row in client.query(TRIGGERS_SQL, &[&schemas])? {
         let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
@@ -532,7 +584,12 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
         };
         let name: String = row.get("tgname");
         let body: String = row.get("prosrc");
-        if crate::triggers::interferes(&body) {
+        let written: Vec<String> = table
+            .columns_to_write()
+            .iter()
+            .map(|c| c.name.to_lowercase())
+            .collect();
+        if crate::triggers::interferes(&body, &written) {
             table.checks.push(CheckConstraint {
                 name: name.clone(),
                 definition: format!(
@@ -586,49 +643,6 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
                     definition: format!("TRIGGER {trigger} writes rows into this table"),
                 });
             }
-        }
-    }
-
-    for row in client.query(CONSTRAINTS_SQL, &[&schemas])? {
-        let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
-        let Some(table) = schema.tables.get_mut(&id) else {
-            continue;
-        };
-
-        let name: String = row.get("conname");
-        let kind = row.get::<_, i8>("contype") as u8 as char;
-        let columns: Vec<String> = row.try_get("columns").unwrap_or_default();
-
-        match kind {
-            'p' | 'u' => table.unique_keys.push(UniqueKey {
-                name,
-                columns,
-                is_primary: kind == 'p',
-            }),
-            'f' => {
-                let ref_schema: Option<String> = row.get("ref_schema");
-                let ref_table: Option<String> = row.get("ref_table");
-                if let (Some(s), Some(t)) = (ref_schema, ref_table) {
-                    table.foreign_keys.push(ForeignKey {
-                        name,
-                        columns,
-                        references: TableId::new(s, t),
-                        referenced_columns: row.try_get("ref_columns").unwrap_or_default(),
-                        deferrable: row.get::<_, bool>("condeferrable"),
-                    });
-                }
-            }
-            // An exclusion constraint is read as a check, which is what it is:
-            // a rule over the row that this cannot prove it satisfies. GitLab
-            // has four, and two of them build `daterange(start_date, due_date)`
-            // out of two columns generated independently — so half the time
-            // the range came out backwards. Not seeing a constraint is not the
-            // same as satisfying it.
-            'c' | 'x' => table.checks.push(CheckConstraint {
-                name,
-                definition: row.get("definition"),
-            }),
-            _ => {}
         }
     }
 

@@ -41,8 +41,23 @@ const HARMLESS_SEVERITIES: [&str; 5] = ["NOTICE", "WARNING", "INFO", "LOG", "DEB
 /// against the generated value was checked against a value that is not there —
 /// and GitLab supplied seven CHECK violations, a duplicate key and three
 /// not-null violations to prove it, all on tables whose triggers cannot raise.
-pub fn interferes(body: &str) -> bool {
-    can_raise(body) || assigns_to_new(body)
+///
+/// But only for a column this actually writes. GitLab has three hundred
+/// triggers that do `NEW."id" := nextval(...)`, and `id` carries a sequence
+/// default, so it is never written here and the trigger overwrites nothing
+/// that was reasoned about. Refusing on any assignment at all cost three
+/// hundred tables for no gain, which is the same trap as refusing every CHECK.
+pub fn interferes(body: &str, written: &[String]) -> bool {
+    if can_raise(body) {
+        return true;
+    }
+    // A column filled from a sequence is handled rather than refused, so an
+    // assignment to one is not interference.
+    let from_sequence = filled_from_sequence(body);
+    assigns_to_new(body)
+        .iter()
+        .filter(|c| !from_sequence.contains(c))
+        .any(|c| written.iter().any(|w| w == c))
 }
 
 /// Tables this trigger body writes rows into.
@@ -100,52 +115,134 @@ pub fn writes_to(body: &str) -> Vec<String> {
     out
 }
 
+/// Columns this trigger fills from a sequence, and nothing else.
+///
+/// `NEW."id" := nextval('t_id_seq'::regclass)` is a sequence default written
+/// as a trigger, which is how GitLab gives three hundred tables their primary
+/// key. Treating it as interference refused all three hundred; treating the
+/// column as database-generated — never written here, read back with a
+/// subquery when a child needs it — is both correct and what the schema
+/// author meant.
+///
+/// Only where the whole right-hand side is the `nextval` call. Anything else
+/// computed from it is a different rule and is not read.
+pub fn filled_from_sequence(body: &str) -> Vec<String> {
+    let upper = body.to_uppercase();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(at) = word_at(&upper[from..], "NEW.").map(|i| from + i) {
+        from = at + 4;
+        let rest = &upper[from..];
+        let Some((column, consumed)) = column_name(rest) else {
+            continue;
+        };
+        let after = rest[consumed..].trim_start();
+        let Some(value) = after.strip_prefix(":=") else {
+            continue;
+        };
+        // Up to the end of the statement, which is where the assignment ends.
+        let value = value.split(';').next().unwrap_or("").trim();
+        // The whole value, not merely the start of it: `nextval('s') * 2` is
+        // a different rule and reading it as a sequence default would claim a
+        // column holds something it does not.
+        if is_only_a_call(value, "NEXTVAL") {
+            out.push(column);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Whether the text is exactly one call to `name` and nothing more.
+fn is_only_a_call(text: &str, name: &str) -> bool {
+    let Some(rest) = text.trim().strip_prefix(name) else {
+        return false;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix('(') else {
+        return false;
+    };
+    let mut depth = 1i32;
+    for (index, ch) in rest.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return rest[index + 1..].trim().is_empty();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Whether the body writes to `NEW`.
 ///
 /// `NEW.updated_at := now()` and `NEW.id = nextval(...)` are both assignments;
 /// `IF NEW.a = NEW.b` is a comparison and changes nothing. Told apart by
 /// position rather than by parsing: an assignment is the first thing in its
 /// statement, a comparison never is.
-pub fn assigns_to_new(body: &str) -> bool {
-    // `:=` is only ever assignment, wherever it appears.
-    if body.contains(":=") {
-        return true;
-    }
-
-    // And `SELECT ... INTO NEW.col`, which is the third spelling and the one
-    // that cost the most to find. GitLab fills a sharding key that way —
-    // `SELECT namespace_id INTO NEW.protected_branch_namespace_id FROM ...` —
-    // and a CHECK requiring that column to be set then passes against a value
-    // this never wrote.
+pub fn assigns_to_new(body: &str) -> Vec<String> {
     let upper = body.to_uppercase();
+    let mut out = Vec::new();
+
+    // `SELECT ... INTO NEW.col`, the third spelling and the one that cost the
+    // most to find. GitLab fills a sharding key that way.
     let mut from = 0usize;
     while let Some(at) = word_at(&upper[from..], "INTO").map(|i| from + i) {
         from = at + 4;
         let rest = upper[from..].trim_start();
         let rest = rest.strip_prefix("STRICT").map_or(rest, str::trim_start);
-        if rest.starts_with("NEW.") || rest.starts_with("NEW\"") {
-            return true;
+        if let Some((column, _)) = rest.strip_prefix("NEW.").and_then(column_name) {
+            out.push(column);
         }
     }
 
-    // Otherwise `NEW.col = ...` is an assignment exactly when the `NEW` is the
-    // first thing in its statement. Looking back to the nearest boundary says
-    // so without parsing: `IF NEW.a = NEW.b` has an `IF` in the way, and
-    // `BEGIN NEW.id = nextval(...)` has only whitespace.
+    // `NEW.col := ...`, and `NEW.col = ...` where it starts a statement.
     let mut from = 0usize;
     while let Some(at) = word_at(&upper[from..], "NEW.").map(|i| from + i) {
         from = at + 4;
-        if !starts_a_statement(&upper[..at]) {
+        let rest = &upper[from..];
+        // The length consumed, not the name's length: `"ID"` is four
+        // characters and `id` is two, and using the second to skip the first
+        // left the scan pointing at a quote — so GitLab's three hundred
+        // `NEW."id" := nextval(...)` triggers read as assigning nothing.
+        let Some((column, consumed)) = column_name(rest) else {
             continue;
-        }
-        let after_column =
-            upper[from..].trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
-        let assignment = after_column.trim_start();
-        if assignment.starts_with('=') && !assignment.starts_with("==") {
-            return true;
+        };
+        let after = rest[consumed..].trim_start();
+        let assigned = after.starts_with(":=")
+            || (starts_a_statement(&upper[..at])
+                && after.starts_with('=')
+                && !after.starts_with("=="));
+        if assigned {
+            out.push(column);
         }
     }
-    false
+
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The identifier at the start of the text, quoted or not, in lower case —
+/// and how many bytes of the text it occupied, which is not the same number
+/// once quotes are involved.
+fn column_name(text: &str) -> Option<(String, usize)> {
+    let leading = text.len() - text.trim_start().len();
+    let text = text.trim_start();
+    if let Some(rest) = text.strip_prefix('"') {
+        let name = rest.split('"').next()?;
+        // The name, plus both quotes, plus whatever whitespace came first.
+        return (!name.is_empty()).then(|| (name.to_lowercase(), leading + name.len() + 2));
+    }
+    let name: String = text
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then(|| (name.to_lowercase(), leading + name.len()))
 }
 
 /// Whether this trigger function body can stop an insert.
@@ -220,6 +317,13 @@ fn is_word_byte(byte: u8) -> bool {
 mod tests {
     use super::*;
 
+    /// `interferes` against a table that writes every column a body might
+    /// touch, which is what the old yes-or-no behaviour amounted to.
+    fn interferes_any(body: &str) -> bool {
+        let written = assigns_to_new(body);
+        interferes(body, &written)
+    }
+
     #[test]
     fn an_exception_stops_an_insert_and_a_warning_does_not() {
         // Both shapes are in the corpus. Discourse raises; GitLab warns.
@@ -262,16 +366,20 @@ mod tests {
     fn a_body_that_rewrites_the_row_interferes_even_though_it_cannot_raise() {
         // The whole reason `interferes` exists rather than just `can_raise`.
         assert!(!can_raise("BEGIN NEW.updated_at := now(); RETURN NEW; END"));
-        assert!(interferes("BEGIN NEW.updated_at := now(); RETURN NEW; END"));
-        assert!(interferes("BEGIN NEW.id = nextval('s'); RETURN NEW; END"));
+        assert!(interferes_any(
+            "BEGIN NEW.updated_at := now(); RETURN NEW; END"
+        ));
+        assert!(interferes_any(
+            "BEGIN NEW.id = nextval('s'); RETURN NEW; END"
+        ));
         // The third spelling, and the one GitLab uses to fill a sharding key.
-        assert!(interferes(
+        assert!(interferes_any(
             "BEGIN SELECT namespace_id INTO NEW.ns_id FROM parents              WHERE parents.id = NEW.parent_id; RETURN NEW; END"
         ));
-        assert!(interferes(
+        assert!(interferes_any(
             "BEGIN SELECT a INTO STRICT NEW.\"b\" FROM t; RETURN NEW; END"
         ));
-        assert!(interferes(
+        assert!(interferes_any(
             "begin
   new.state = 0;
   return new;
@@ -291,7 +399,7 @@ end"
         );
         // Writing elsewhere is not interference on its own — the caller
         // decides, because only it knows whether the target was read.
-        assert!(!interferes(
+        assert!(!interferes_any(
             "BEGIN INSERT INTO audit (x) VALUES (1); RETURN NEW; END"
         ));
         assert!(writes_to("BEGIN RETURN NEW; END").is_empty());
@@ -312,15 +420,44 @@ end"
     }
 
     #[test]
+    fn a_column_this_never_writes_can_be_overwritten_freely() {
+        // GitLab has three hundred of these. `id` carries a sequence default,
+        // so it is never written here and the trigger overwrites nothing that
+        // was reasoned about.
+        // A plain overwrite rather than a sequence, so the only question is
+        // whether the column is one this writes.
+        let body = "BEGIN NEW.\"cached_at\" := now(); RETURN NEW; END";
+        assert_eq!(assigns_to_new(body), vec!["cached_at".to_string()]);
+        assert!(!interferes(body, &["name".to_string()]));
+        assert!(interferes(
+            body,
+            &["cached_at".to_string(), "name".to_string()]
+        ));
+    }
+
+    #[test]
+    fn a_sequence_default_written_as_a_trigger_is_handled_not_refused() {
+        let body = "BEGIN NEW.\"id\" := nextval('t_id_seq'::regclass); RETURN NEW; END";
+        assert_eq!(filled_from_sequence(body), vec!["id".to_string()]);
+        // Even though `id` is a column this would otherwise write.
+        assert!(!interferes(body, &["id".to_string()]));
+
+        // Anything else computed from it is a different rule.
+        let derived = "BEGIN NEW.id := nextval('s') * 2; RETURN NEW; END";
+        assert!(filled_from_sequence(derived).is_empty());
+        assert!(interferes(derived, &["id".to_string()]));
+    }
+
+    #[test]
     fn reading_new_is_not_writing_to_it() {
         // A comparison changes nothing, and refusing on it would cost the
         // several hundred tables whose triggers only ever look.
-        assert!(!interferes(
+        assert!(!interferes_any(
             "BEGIN IF NEW.a = NEW.b THEN RETURN NULL; END IF; RETURN NEW; END"
         ));
-        assert!(!interferes("BEGIN RETURN NEW; END"));
+        assert!(!interferes_any("BEGIN RETURN NEW; END"));
         // `INTO` a local variable is not `INTO NEW`.
-        assert!(!interferes(
+        assert!(!interferes_any(
             "DECLARE n int; BEGIN SELECT count(*) INTO n FROM t; RETURN NEW; END"
         ));
     }
