@@ -16,6 +16,28 @@ use crate::classify::Verdict;
 use crate::generate::{bounds_for, value, Bounds, Literal};
 use crate::schema::{quote_ident, Schema, Table, TableId};
 
+/// Forwards each finished statement to the caller, and remembers whether the
+/// caller asked to stop. A tiny shim so the generation code below can go on
+/// saying `out.push(...)` and mean "hand this over" rather than "keep this".
+struct Emitter<'a> {
+    emit: &'a mut dyn FnMut(&str) -> bool,
+    stopped: bool,
+}
+
+impl Emitter<'_> {
+    fn push(&mut self, statement: impl AsRef<str>) {
+        if !self.stopped {
+            self.stopped = !(self.emit)(statement.as_ref());
+        }
+    }
+
+    fn extend(&mut self, statements: impl IntoIterator<Item = String>) {
+        for statement in statements {
+            self.push(statement);
+        }
+    }
+}
+
 /// Values already written for a table's primary key, so children can point at
 /// them. Keyed by column, because a composite key has to be drawn as a *row*
 /// rather than column by column — picking `tenant_id` from one parent and
@@ -119,14 +141,54 @@ fn borrow_from_database(
 /// Wrapped in a transaction, because a partial seed is worse than none: it
 /// looks like it worked.
 pub fn sql(schema: &Schema, verdict: &Verdict, options: &Options) -> String {
-    let mut out = String::from("BEGIN;\n");
-    for statement in statements(schema, verdict, options) {
-        out.push('\n');
-        out.push_str(&statement);
-        out.push('\n');
+    let mut out = Vec::new();
+    write_sql(&mut out, schema, verdict, options).expect("writing to a Vec cannot fail");
+    String::from_utf8(out).expect("every statement is valid UTF-8")
+}
+
+/// Write the SQL out, a statement at a time.
+///
+/// What the binary uses. `sql` builds the same text in memory and is kept for
+/// the tests, where holding a few kilobytes is the convenient thing; this
+/// holds one statement, which is what makes a very large schema at a very
+/// large row count a question of patience rather than of available memory.
+pub fn write_sql(
+    writer: &mut dyn std::io::Write,
+    schema: &Schema,
+    verdict: &Verdict,
+    options: &Options,
+) -> std::io::Result<()> {
+    let mut failure = None;
+    writer.write_all(
+        b"BEGIN;
+",
+    )?;
+    for_each_statement(schema, verdict, options, &mut |statement| match writer
+        .write_all(
+            b"
+",
+        )
+        .and_then(|()| writer.write_all(statement.as_bytes()))
+        .and_then(|()| {
+            writer.write_all(
+                b"
+",
+            )
+        }) {
+        Ok(()) => true,
+        Err(e) => {
+            failure = Some(e);
+            false
+        }
+    });
+    if let Some(e) = failure {
+        return Err(e);
     }
-    out.push_str("\nCOMMIT;\n");
-    out
+    writer.write_all(
+        b"
+COMMIT;
+",
+    )
 }
 
 /// Run everything against a database, inside one transaction.
@@ -140,13 +202,28 @@ pub fn apply(
     verdict: &Verdict,
     options: &Options,
 ) -> Result<usize, postgres::Error> {
-    let statements = statements(schema, verdict, options);
     let mut transaction = client.transaction()?;
-    for statement in &statements {
-        transaction.batch_execute(statement)?;
+    let mut written = 0usize;
+    let mut failure = None;
+    for_each_statement(schema, verdict, options, &mut |statement| match transaction
+        .batch_execute(statement)
+    {
+        Ok(()) => {
+            written += 1;
+            true
+        }
+        Err(e) => {
+            failure = Some(e);
+            false
+        }
+    });
+    if let Some(e) = failure {
+        // Dropping the transaction rolls it back, so the database is as it
+        // was. Returning the error rather than a count says so.
+        return Err(e);
     }
     transaction.commit()?;
-    Ok(statements.len())
+    Ok(written)
 }
 
 /// Every statement needed, in order, without a transaction around them.
@@ -154,14 +231,38 @@ pub fn apply(
 /// One implementation behind both the SQL text and the direct apply. Two would
 /// drift, and the one nobody tested would be the one somebody ran.
 pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for_each_statement(schema, verdict, options, &mut |statement| {
+        out.push(statement.to_string());
+        true
+    });
+    out
+}
+
+/// Every statement, handed over one at a time.
+///
+/// The streaming form, and the one the binary uses. Holding them all costs
+/// what they weigh — GitLab at a thousand rows a table is 205 MB — and there
+/// is no reason to, since each is finished before the next begins. Return
+/// `false` from `emit` to stop early, which is how `apply` gets out on the
+/// first statement the database refuses.
+pub fn for_each_statement(
+    schema: &Schema,
+    verdict: &Verdict,
+    options: &Options,
+    emit: &mut dyn FnMut(&str) -> bool,
+) {
+    let mut out = Emitter {
+        emit,
+        stopped: false,
+    };
     let mut pool: KeyPool = BTreeMap::new();
 
     // A cycle of deferrable keys is populated by holding the checks until
     // commit. Postgres allows that only for constraints declared DEFERRABLE,
     // which is why `graph` decides it and this only says it.
     if verdict.deferred_constraints {
-        out.push("SET CONSTRAINTS ALL DEFERRED;".into());
+        out.push("SET CONSTRAINTS ALL DEFERRED;");
     }
 
     // How many rows each table gets: what was asked for, or as many as its
@@ -297,7 +398,6 @@ pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<
     }
 
     out.extend(repair_cycles(schema, verdict));
-    out
 }
 
 /// Fill in the keys that were left NULL to break a cycle.

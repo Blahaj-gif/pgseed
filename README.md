@@ -171,6 +171,21 @@ Determinism is *not* the differentiator; that tool has it too. The
 differentiators are: no codegen, no client, no runtime, no API key, and being
 alive.
 
+## Speed
+
+Measured on a **release** build, which is what ships. A debug test binary is
+about seven times slower, and quoting one of those was how this README once
+claimed 68 seconds for a job that takes ten.
+
+| | generate | SQL |
+|---|---:|---:|
+| 14 tables, 50 rows each | 28 ms | 63 KB |
+| GitLab, 50 rows each | 0.3 s | 5 MB |
+| GitLab, 1000 rows each | 4.9 s | 103 MB |
+
+The SQL is streamed a statement at a time rather than built and then written,
+so the last row of that table is a file size and not a memory requirement.
+
 ## Testing
 
 ```

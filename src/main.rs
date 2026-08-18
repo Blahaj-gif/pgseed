@@ -181,18 +181,20 @@ fn run() -> Result<std::process::ExitCode, String> {
             Err(e) => return Err(format!("nothing was written — {e}")),
         }
     } else if !args.plan {
-        let sql = emit::sql(&read, &verdict, &options);
-        match &args.out {
-            Some(path) => std::fs::write(path, &sql)
-                .map_err(|e| format!("cannot write {}: {e}", path.display()))?,
+        // Streamed rather than built and then written: a large schema at a
+        // large row count is hundreds of megabytes, and there is no reason to
+        // hold it when each statement is finished before the next begins.
+        let mut target: Box<dyn std::io::Write> = match &args.out {
+            Some(path) => Box::new(std::io::BufWriter::new(
+                std::fs::File::create(path)
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?,
+            )),
             // stdout, so the report on stderr does not mix prose into it.
-            None => {
-                let mut stdout = std::io::stdout().lock();
-                stdout
-                    .write_all(sql.as_bytes())
-                    .map_err(|e| format!("cannot write the SQL: {e}"))?;
-            }
-        }
+            None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
+        };
+        emit::write_sql(&mut target, &read, &verdict, &options)
+            .and_then(|()| target.flush())
+            .map_err(|e| format!("cannot write the SQL: {e}"))?;
     }
 
     report(&read, &verdict, &rows, &dropped);
