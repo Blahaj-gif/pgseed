@@ -58,8 +58,8 @@ hold rows** — two facts a person can answer instantly and a tool cannot.
 | Lago | 137 | 116 | 85% |
 | Sourcegraph *(frontend)* | 180 | 80 | 44% |
 | Discourse | 351 | 327 | 93% |
-| GitLab | 956 | 242 | 25% |
-| **total** | **2,215** | **1,311** | **59%** |
+| GitLab | 956 | 703 | 74% |
+| **total** | **2,215** | **1,772** | **80%** |
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. Three are *replayed* migration directories rather
@@ -77,7 +77,7 @@ writes SQL; `--plan` reports what it would do and writes nothing.
 Every row it produces is checked by the only authority that matters: a test
 generates for each corpus schema at the default fifty rows, applies the result
 to a real Postgres, and fails if a single statement is rejected. It currently
-generates **1,725 statements across the eighteen schemas and Postgres accepts
+generates **2,186 statements across the eighteen schemas and Postgres accepts
 every one**. The gate is zero, not a percentage — the whole thesis is that the
 database adjudicates, so one row it refuses is a failure rather than a figure
 to be pleased with.

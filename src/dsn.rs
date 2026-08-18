@@ -89,9 +89,7 @@ pub fn is_local(dsn: &str) -> bool {
 /// `127.example.com` is a perfectly legal hostname belonging to somebody else.
 fn is_loopback_v4(host: &str) -> bool {
     let parts: Vec<&str> = host.split('.').collect();
-    parts.len() == 4
-        && parts.iter().all(|p| p.parse::<u8>().is_ok())
-        && parts[0] == "127"
+    parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok()) && parts[0] == "127"
 }
 
 #[cfg(test)]
@@ -100,17 +98,32 @@ mod tests {
 
     #[test]
     fn a_uri_gives_up_its_host_without_the_port_or_the_credentials() {
-        assert_eq!(host("postgres://db.example.com/app").as_deref(), Some("db.example.com"));
-        assert_eq!(host("postgres://u:p@db.example.com:5432/app").as_deref(), Some("db.example.com"));
-        assert_eq!(host("postgresql://localhost:5432/app").as_deref(), Some("localhost"));
+        assert_eq!(
+            host("postgres://db.example.com/app").as_deref(),
+            Some("db.example.com")
+        );
+        assert_eq!(
+            host("postgres://u:p@db.example.com:5432/app").as_deref(),
+            Some("db.example.com")
+        );
+        assert_eq!(
+            host("postgresql://localhost:5432/app").as_deref(),
+            Some("localhost")
+        );
         // A password may contain an `@`, so the split is on the *last* one.
-        assert_eq!(host("postgres://u:p@ss@real.host/app").as_deref(), Some("real.host"));
+        assert_eq!(
+            host("postgres://u:p@ss@real.host/app").as_deref(),
+            Some("real.host")
+        );
         assert_eq!(host("postgres://[::1]:5432/app").as_deref(), Some("::1"));
     }
 
     #[test]
     fn the_keyword_form_works_too() {
-        assert_eq!(host("host=db.example.com port=5432 dbname=app").as_deref(), Some("db.example.com"));
+        assert_eq!(
+            host("host=db.example.com port=5432 dbname=app").as_deref(),
+            Some("db.example.com")
+        );
         assert_eq!(host("dbname=app user=me"), None);
     }
 

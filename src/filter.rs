@@ -91,14 +91,20 @@ pub struct RowCounts {
 
 impl Default for RowCounts {
     fn default() -> Self {
-        RowCounts { default: 50, overrides: Vec::new() }
+        RowCounts {
+            default: 50,
+            overrides: Vec::new(),
+        }
     }
 }
 
 impl RowCounts {
     /// A flat count for every table.
     pub fn flat(default: usize) -> RowCounts {
-        RowCounts { default, overrides: Vec::new() }
+        RowCounts {
+            default,
+            overrides: Vec::new(),
+        }
     }
 
     /// Parse the repeatable `--rows` argument, which is either a bare number
@@ -112,9 +118,10 @@ impl RowCounts {
         for argument in arguments {
             match argument.split_once('=') {
                 Some((pattern, count)) => {
-                    let count: usize = count.trim().parse().map_err(|_| {
-                        format!("--rows {argument}: \"{count}\" is not a number")
-                    })?;
+                    let count: usize = count
+                        .trim()
+                        .parse()
+                        .map_err(|_| format!("--rows {argument}: \"{count}\" is not a number"))?;
                     if pattern.trim().is_empty() {
                         return Err(format!("--rows {argument}: no table named"));
                     }
@@ -183,7 +190,10 @@ pub fn already_populated(
     for id in tables {
         // LIMIT 1 inside, so this asks "is there anything here" rather than
         // counting every row of a table that might hold millions.
-        let sql = format!("SELECT count(*) FROM (SELECT 1 FROM {} LIMIT 1) t", id.quoted());
+        let sql = format!(
+            "SELECT count(*) FROM (SELECT 1 FROM {} LIMIT 1) t",
+            id.quoted()
+        );
         if let Ok(row) = client.query_one(&sql, &[]) {
             let n: i64 = row.get(0);
             if n > 0 {
@@ -247,7 +257,10 @@ mod tests {
 
     #[test]
     fn a_pattern_matches_the_qualified_name_too() {
-        let s = Selection { include: vec!["billing.*".into()], exclude: vec![] };
+        let s = Selection {
+            include: vec!["billing.*".into()],
+            exclude: vec![],
+        };
         assert!(s.allows(&TableId::new("billing", "invoices")));
         assert!(!s.allows(&TableId::new("public", "invoices")));
     }

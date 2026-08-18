@@ -63,9 +63,7 @@ fn dollar_tags(line: &str) -> Vec<&str> {
         while end < bytes.len() && (bytes[end] == b'_' || bytes[end].is_ascii_alphanumeric()) {
             end += 1;
         }
-        let is_tag = end < bytes.len()
-            && bytes[end] == b'$'
-            && !bytes[index + 1].is_ascii_digit();
+        let is_tag = end < bytes.len() && bytes[end] == b'$' && !bytes[index + 1].is_ascii_digit();
         if is_tag {
             out.push(&line[index..=end]);
             index = end + 1;
@@ -186,9 +184,14 @@ fn measure(name: &str, path: &Path, max_lost: usize) {
             Err(e) => {
                 skipped += 1;
                 if skipped <= 4 {
-                    let why = e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().into());
+                    let why = e
+                        .as_db_error()
+                        .map_or_else(|| e.to_string(), |d| d.message().into());
                     let what: String = statement.trim_start().chars().take(70).collect();
-                    eprintln!("      SKIPPED {}: {what}", why.chars().take(70).collect::<String>());
+                    eprintln!(
+                        "      SKIPPED {}: {what}",
+                        why.chars().take(70).collect::<String>()
+                    );
                 }
                 // A skipped ALTER TABLE ADD CONSTRAINT means the schema in the
                 // database is *less* constrained than the real one, which would
@@ -218,10 +221,11 @@ fn measure(name: &str, path: &Path, max_lost: usize) {
                             .as_db_error()
                             .map_or_else(|| e.to_string(), |d| d.message().into());
                         let why: String = why.chars().take(90).collect();
-                        let what: String =
-                            statement.trim_start().chars().take(60).collect();
-                        eprintln!("      under-constrained: {why}
-        {what}");
+                        let what: String = statement.trim_start().chars().take(60).collect();
+                        eprintln!(
+                            "      under-constrained: {why}
+        {what}"
+                        );
                     }
                 }
             }
@@ -290,7 +294,8 @@ fn measure(name: &str, path: &Path, max_lost: usize) {
             assert!(
                 seen.contains(&fk.references),
                 "{name}: {id} is inserted before {}, which it requires via {}",
-                fk.references, fk.name
+                fk.references,
+                fk.name
             );
         }
         seen.insert(id.clone());
@@ -320,24 +325,37 @@ fn measure(name: &str, path: &Path, max_lost: usize) {
             Ok(()) => accepted += 1,
             Err(e) => {
                 rejected += 1;
-                let code = e.as_db_error().map_or("?".into(), |d| d.code().code().to_string());
+                let code = e
+                    .as_db_error()
+                    .map_or("?".into(), |d| d.code().code().to_string());
                 *by_code.entry(code.clone()).or_insert(0usize) += 1;
                 // A CHECK violation is the one that matters: it is data that
                 // breaks a rule the schema stated, which is the exact failure
                 // this project was built to refuse rather than commit.
-if true {
-                    let head: String =
-                        statement.lines().take(4).collect::<Vec<_>>().join(" ")
-                            .chars().take(320).collect();
-                    println!("      DOCTRINE {code}: {} | {head}",
-                        e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().into()));
+                if true {
+                    let head: String = statement
+                        .lines()
+                        .take(4)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(320)
+                        .collect();
+                    println!(
+                        "      DOCTRINE {code}: {} | {head}",
+                        e.as_db_error()
+                            .map_or_else(|| e.to_string(), |d| d.message().into())
+                    );
                 }
                 if first_failures.len() < 3 {
                     let head: String = statement.lines().take(2).collect::<Vec<_>>().join(" ");
                     let head: String = head.chars().take(110).collect();
-                    first_failures.push(format!("{}
+                    first_failures.push(format!(
+                        "{}
         {head}",
-                        e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().into())));
+                        e.as_db_error()
+                            .map_or_else(|| e.to_string(), |d| d.message().into())
+                    ));
                 }
             }
         }
@@ -365,7 +383,8 @@ if true {
     // The whole thesis is that the database adjudicates: one row it refuses is
     // a failure, not a percentage to be pleased with.
     assert_eq!(
-        rejected, 0,
+        rejected,
+        0,
         "{name}: Postgres rejected {rejected} of {} generated statements. 
          The gate is zero — the database is the oracle, and a row it refuses 
          is a row this should have refused first.
@@ -408,7 +427,11 @@ fn reach_against_real_schemas() {
         // finding these.
         ("hydra", 99),
     ] {
-        measure(name, &Path::new("tests/corpus").join(format!("{name}.sql")), max_lost);
+        measure(
+            name,
+            &Path::new("tests/corpus").join(format!("{name}.sql")),
+            max_lost,
+        );
     }
 }
 
@@ -422,22 +445,42 @@ fn reach_against_real_schemas() {
 #[ignore]
 fn survey_the_checks_this_does_not_understand() {
     let (mut total, mut known) = (0usize, 0usize);
-    for name in ["powerdns", "hasura", "kong", "harbor", "temporal",
-                 "postgrest", "synapse", "discourse", "gitlab",
-                 "lago", "sourcegraph", "sourcegraph_codeintel",
-                 "sourcegraph_insights", "plausible", "hexpm",
-                 "mattermost", "vaultwarden", "kratos"] {
+    for name in [
+        "powerdns",
+        "hasura",
+        "kong",
+        "harbor",
+        "temporal",
+        "postgrest",
+        "synapse",
+        "discourse",
+        "gitlab",
+        "lago",
+        "sourcegraph",
+        "sourcegraph_codeintel",
+        "sourcegraph_insights",
+        "plausible",
+        "hexpm",
+        "mattermost",
+        "vaultwarden",
+        "kratos",
+    ] {
         let path = Path::new("tests/corpus").join(format!("{name}.sql"));
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         let db = Db::start();
         let mut client = db.client();
         for schema_name in schemas_in(&text) {
-            let _ = client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";"));
+            let _ =
+                client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";"));
         }
         for statement in statements(&text) {
             let _ = client.batch_execute(&statement);
         }
-        let Ok(schema) = pgsow::introspect::read(&mut client, &schemas_in(&text)) else { continue };
+        let Ok(schema) = pgsow::introspect::read(&mut client, &schemas_in(&text)) else {
+            continue;
+        };
         for table in schema.tables.values() {
             for check in &table.checks {
                 total += 1;
@@ -445,14 +488,21 @@ fn survey_the_checks_this_does_not_understand() {
                     pgsow::checks::interpret(&check.definition),
                     pgsow::checks::Meaning::Unknown
                 ) {
-                    println!("UNKNOWN\t{}", check.definition.replace('\n', " "));
+                    println!(
+                        "UNKNOWN\t{name}\t{}\t{}",
+                        table.id,
+                        check.definition.replace('\n', " ")
+                    );
                 } else {
                     known += 1;
                 }
             }
         }
     }
-    println!("TOTALS	{total} checks, {known} understood, {} not", total - known);
+    println!(
+        "TOTALS	{total} checks, {known} understood, {} not",
+        total - known
+    );
 }
 
 /// Is INSERT actually too slow, and could COPY even be used?
@@ -470,16 +520,21 @@ fn survey_the_checks_this_does_not_understand() {
 fn volume_and_whether_copy_could_carry_it() {
     for name in ["discourse", "gitlab"] {
         let path = Path::new("tests/corpus").join(format!("{name}.sql"));
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         let db = Db::start();
         let mut client = db.client();
         for schema_name in schemas_in(&text) {
-            let _ = client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";"));
+            let _ =
+                client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";"));
         }
         for statement in statements(&text) {
             let _ = client.batch_execute(&statement);
         }
-        let Ok(schema) = pgsow::introspect::read(&mut client, &schemas_in(&text)) else { continue };
+        let Ok(schema) = pgsow::introspect::read(&mut client, &schemas_in(&text)) else {
+            continue;
+        };
         let order = pgsow::graph::order(&schema);
         let verdict = pgsow::classify::classify(&schema, &order);
 
@@ -492,8 +547,7 @@ fn volume_and_whether_copy_could_carry_it() {
 
             // How much of it COPY could carry. A statement holding a subquery
             // cannot become a COPY at all; the rest could.
-            let with_subquery =
-                statements.iter().filter(|s| s.contains("(SELECT ")).count();
+            let with_subquery = statements.iter().filter(|s| s.contains("(SELECT ")).count();
 
             let started = std::time::Instant::now();
             let mut transaction = client.transaction().unwrap();
@@ -508,9 +562,10 @@ fn volume_and_whether_copy_could_carry_it() {
                     if first_error.is_empty() {
                         first_error = e
                             .as_db_error()
-                            .map_or_else(|| e.to_string(), |d| {
-                                format!("{} | {}", d.code().code(), d.message())
-                            })
+                            .map_or_else(
+                                || e.to_string(),
+                                |d| format!("{} | {}", d.code().code(), d.message()),
+                            )
                             .chars()
                             .take(140)
                             .collect();

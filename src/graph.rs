@@ -152,7 +152,10 @@ pub fn order(schema: &Schema) -> Order {
         let group = smallest_cycle(&pending);
         let strategy = strategy_for(schema, &group);
         let blocked = matches!(strategy, CycleStrategy::Impossible { .. });
-        cycles.push(Cycle { tables: group.clone(), strategy });
+        cycles.push(Cycle {
+            tables: group.clone(),
+            strategy,
+        });
 
         // A broken cycle is inserted in the order that remains once the
         // nulled keys are set aside — not in name order, which is right only
@@ -176,7 +179,10 @@ pub fn order(schema: &Schema) -> Order {
         }
     }
 
-    Order { tables: sorted, cycles }
+    Order {
+        tables: sorted,
+        cycles,
+    }
 }
 
 /// One cycle out of the remaining graph.
@@ -223,7 +229,9 @@ fn sort_group(
 ) -> Option<Vec<TableId>> {
     let mut pending: BTreeMap<TableId, BTreeSet<TableId>> = BTreeMap::new();
     for id in group {
-        let Some(table) = schema.get(id) else { continue };
+        let Some(table) = schema.get(id) else {
+            continue;
+        };
         let mut deps = BTreeSet::new();
         for fk in &table.foreign_keys {
             // A self-reference counts here, unlike in the outer graph. There
@@ -309,7 +317,9 @@ fn strategy_for(schema: &Schema, group: &[TableId]) -> CycleStrategy {
     let mut involved: Vec<String> = Vec::new();
     let mut all_deferrable = true;
     for id in group {
-        let Some(table) = schema.get(id) else { continue };
+        let Some(table) = schema.get(id) else {
+            continue;
+        };
         for fk in &table.foreign_keys {
             if group.contains(&fk.references) {
                 involved.push(fk.name.clone());
@@ -321,7 +331,9 @@ fn strategy_for(schema: &Schema, group: &[TableId]) -> CycleStrategy {
     }
     if all_deferrable && !involved.is_empty() {
         involved.sort();
-        return CycleStrategy::Deferred { constraints: involved };
+        return CycleStrategy::Deferred {
+            constraints: involved,
+        };
     }
 
     let names: Vec<String> = group.iter().map(|t| t.to_string()).collect();
@@ -401,7 +413,11 @@ mod tests {
     #[test]
     fn parents_are_inserted_before_children() {
         let s = schema_of(vec![
-            table("orders", vec![col("user_id", false)], vec![fk("fk", "user_id", "users", false)]),
+            table(
+                "orders",
+                vec![col("user_id", false)],
+                vec![fk("fk", "user_id", "users", false)],
+            ),
             table("users", vec![col("id", false)], vec![]),
         ]);
         assert_eq!(names(&order(&s)), vec!["users", "orders"]);
@@ -410,8 +426,16 @@ mod tests {
     #[test]
     fn a_chain_is_ordered_all_the_way_down() {
         let s = schema_of(vec![
-            table("items", vec![col("order_id", false)], vec![fk("a", "order_id", "orders", false)]),
-            table("orders", vec![col("user_id", false)], vec![fk("b", "user_id", "users", false)]),
+            table(
+                "items",
+                vec![col("order_id", false)],
+                vec![fk("a", "order_id", "orders", false)],
+            ),
+            table(
+                "orders",
+                vec![col("user_id", false)],
+                vec![fk("b", "user_id", "users", false)],
+            ),
             table("users", vec![col("id", false)], vec![]),
         ]);
         assert_eq!(names(&order(&s)), vec!["users", "orders", "items"]);
@@ -441,7 +465,10 @@ mod tests {
         let o = order(&s);
         assert_eq!(names(&o), vec!["employees"]);
         assert_eq!(o.cycles.len(), 1);
-        assert!(matches!(o.cycles[0].strategy, CycleStrategy::NullThenUpdate { .. }));
+        assert!(matches!(
+            o.cycles[0].strategy,
+            CycleStrategy::NullThenUpdate { .. }
+        ));
     }
 
     #[test]
@@ -449,10 +476,16 @@ mod tests {
         // users.default_org_id → orgs, orgs.owner_id → users. The nullable one
         // is inserted empty and filled in afterwards.
         let s = schema_of(vec![
-            table("users", vec![col("default_org_id", true)],
-                  vec![fk("u_org", "default_org_id", "orgs", false)]),
-            table("orgs", vec![col("owner_id", false)],
-                  vec![fk("o_owner", "owner_id", "users", false)]),
+            table(
+                "users",
+                vec![col("default_org_id", true)],
+                vec![fk("u_org", "default_org_id", "orgs", false)],
+            ),
+            table(
+                "orgs",
+                vec![col("owner_id", false)],
+                vec![fk("o_owner", "owner_id", "users", false)],
+            ),
         ]);
         let o = order(&s);
         assert_eq!(o.cycles.len(), 1);
@@ -480,10 +513,16 @@ mod tests {
         // and placing the group alphabetically then writes `a` before `b`
         // while `a` still requires it.
         let s = schema_of(vec![
-            table("a", vec![col("b1", true), col("b2", true)],
-                  vec![fk("a_b1", "b1", "b", false), fk("a_b2", "b2", "b", false)]),
-            table("b", vec![col("a1", true), col("a2", true)],
-                  vec![fk("b_a1", "a1", "a", false), fk("b_a2", "a2", "a", false)]),
+            table(
+                "a",
+                vec![col("b1", true), col("b2", true)],
+                vec![fk("a_b1", "b1", "b", false), fk("a_b2", "b2", "b", false)],
+            ),
+            table(
+                "b",
+                vec![col("a1", true), col("a2", true)],
+                vec![fk("b_a1", "a1", "a", false), fk("b_a2", "a2", "a", false)],
+            ),
         ]);
         let o = order(&s);
         match &o.cycles[0].strategy {
@@ -499,21 +538,28 @@ mod tests {
     fn a_key_a_check_says_is_not_null_cannot_be_used_to_break_a_cycle() {
         // Nulling it would violate the CHECK on the very first insert.
         use crate::schema::CheckConstraint;
-        let mut users = table("users", vec![col("default_org_id", true)],
-                              vec![fk("u_org", "default_org_id", "orgs", false)]);
+        let mut users = table(
+            "users",
+            vec![col("default_org_id", true)],
+            vec![fk("u_org", "default_org_id", "orgs", false)],
+        );
         users.checks.push(CheckConstraint {
             name: "check_org".into(),
             definition: "CHECK ((default_org_id IS NOT NULL))".into(),
         });
         let s = schema_of(vec![
             users,
-            table("orgs", vec![col("owner_id", false)],
-                  vec![fk("o_owner", "owner_id", "users", false)]),
+            table(
+                "orgs",
+                vec![col("owner_id", false)],
+                vec![fk("o_owner", "owner_id", "users", false)],
+            ),
         ]);
         let o = order(&s);
         assert!(
             matches!(o.cycles[0].strategy, CycleStrategy::Impossible { .. }),
-            "got {:?}", o.cycles[0].strategy
+            "got {:?}",
+            o.cycles[0].strategy
         );
         assert_eq!(o.blocked().len(), 2);
     }
@@ -521,8 +567,16 @@ mod tests {
     #[test]
     fn a_cycle_of_deferrable_keys_is_deferred() {
         let s = schema_of(vec![
-            table("a", vec![col("b_id", false)], vec![fk("a_b", "b_id", "b", true)]),
-            table("b", vec![col("a_id", false)], vec![fk("b_a", "a_id", "a", true)]),
+            table(
+                "a",
+                vec![col("b_id", false)],
+                vec![fk("a_b", "b_id", "b", true)],
+            ),
+            table(
+                "b",
+                vec![col("a_id", false)],
+                vec![fk("b_a", "a_id", "a", true)],
+            ),
         ]);
         let o = order(&s);
         match &o.cycles[0].strategy {
@@ -538,8 +592,16 @@ mod tests {
         // Every key NOT NULL and not deferrable: genuinely impossible, and the
         // message has to be actionable rather than an apology.
         let s = schema_of(vec![
-            table("a", vec![col("b_id", false)], vec![fk("a_b", "b_id", "b", false)]),
-            table("b", vec![col("a_id", false)], vec![fk("b_a", "a_id", "a", false)]),
+            table(
+                "a",
+                vec![col("b_id", false)],
+                vec![fk("a_b", "b_id", "b", false)],
+            ),
+            table(
+                "b",
+                vec![col("a_id", false)],
+                vec![fk("b_a", "a_id", "a", false)],
+            ),
         ]);
         let o = order(&s);
         let blocked = o.blocked();

@@ -33,7 +33,10 @@ fn a_real_schema_reads_back_the_way_the_ddl_described_it() {
     // The identity column must be recognised as generated: naming it in an
     // INSERT is an error, not an override.
     let id = table.column("id").unwrap();
-    assert!(id.is_generated, "identity column not recognised as generated");
+    assert!(
+        id.is_generated,
+        "identity column not recognised as generated"
+    );
 
     // varchar(255) has to arrive with its limit, or a longer value is written
     // and rejected at runtime.
@@ -41,7 +44,9 @@ fn a_real_schema_reads_back_the_way_the_ddl_described_it() {
     assert!(!email.nullable);
     assert_eq!(
         email.type_,
-        pgsow::schema::ColumnType::Text { max_length: Some(255) }
+        pgsow::schema::ColumnType::Text {
+            max_length: Some(255)
+        }
     );
 
     let nickname = table.column("nickname").unwrap();
@@ -52,7 +57,11 @@ fn a_real_schema_reads_back_the_way_the_ddl_described_it() {
     assert!(created.has_default);
 
     assert!(table.primary_key().is_some());
-    assert_eq!(table.unique_keys.len(), 2, "primary key and the unique on email");
+    assert_eq!(
+        table.unique_keys.len(),
+        2,
+        "primary key and the unique on email"
+    );
 }
 
 #[test]
@@ -71,17 +80,26 @@ fn a_check_constraint_arrives_with_its_expression_and_refuses_the_table() {
 
     let mut client = db.client();
     let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
-    let table = schema.get(&pgsow::schema::TableId::new("public", "invoices")).unwrap();
+    let table = schema
+        .get(&pgsow::schema::TableId::new("public", "invoices"))
+        .unwrap();
 
     assert_eq!(table.checks.len(), 1);
     assert_eq!(table.checks[0].name, "invoices_total_positive");
-    assert!(table.checks[0].definition.contains("total"), "{:?}", table.checks[0]);
+    assert!(
+        table.checks[0].definition.contains("total"),
+        "{:?}",
+        table.checks[0]
+    );
 
     // numeric(10,2) has to come back with both halves unpacked, or every money
     // column in the database gets its decimal point in the wrong place.
     assert_eq!(
         table.column("total").unwrap().type_,
-        pgsow::schema::ColumnType::Numeric { precision: Some(10), scale: Some(2) }
+        pgsow::schema::ColumnType::Numeric {
+            precision: Some(10),
+            scale: Some(2)
+        }
     );
 
     // `total > 0` is a recognised lower bound, so this table is fillable —
@@ -92,7 +110,11 @@ fn a_check_constraint_arrives_with_its_expression_and_refuses_the_table() {
     assert_eq!(verdict.fillable.len(), 1);
     assert_eq!(
         pgsow::checks::interpret(&table.checks[0].definition),
-        pgsow::checks::Meaning::LowerBound { column: "total".into(), min: 0, inclusive: false }
+        pgsow::checks::Meaning::LowerBound {
+            column: "total".into(),
+            min: 0,
+            inclusive: false
+        }
     );
 }
 
@@ -122,14 +144,20 @@ fn a_check_outside_the_closed_set_refuses_its_table_against_a_real_database() {
     let verdict = pgsow::classify::classify(&schema, &order);
 
     assert!(verdict.fillable.is_empty());
-    assert!(verdict.refused[0].1[0].explain().contains("exactly_one_owner"));
+    assert!(verdict.refused[0].1[0]
+        .explain()
+        .contains("exactly_one_owner"));
 
     // And the refusal is not timidity: an ordinary generated string, which is
     // what filling this column without understanding the rule would produce,
     // is rejected by Postgres.
-    let naive = db.client().batch_execute(
-        "INSERT INTO targets (id, code) VALUES (1, 'alpha');");
-    assert!(naive.is_err(), "the database should have rejected a plain word");
+    let naive = db
+        .client()
+        .batch_execute("INSERT INTO targets (id, code) VALUES (1, 'alpha');");
+    assert!(
+        naive.is_err(),
+        "the database should have rejected a plain word"
+    );
 }
 
 #[test]
@@ -153,7 +181,9 @@ fn a_composite_foreign_key_keeps_its_columns_in_the_declared_order() {
 
     let mut client = db.client();
     let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
-    let child = schema.get(&pgsow::schema::TableId::new("public", "child")).unwrap();
+    let child = schema
+        .get(&pgsow::schema::TableId::new("public", "child"))
+        .unwrap();
 
     let fk = &child.foreign_keys[0];
     assert_eq!(fk.columns, vec!["c_tenant", "c_code"]);
@@ -161,7 +191,11 @@ fn a_composite_foreign_key_keeps_its_columns_in_the_declared_order() {
 
     let order = pgsow::graph::order(&schema);
     let names: Vec<&str> = order.tables.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, vec!["parent", "child"], "parent must be inserted first");
+    assert_eq!(
+        names,
+        vec!["parent", "child"],
+        "parent must be inserted first"
+    );
 }
 
 #[test]
@@ -212,11 +246,19 @@ fn a_rigid_cycle_is_refused_against_a_real_database() {
     assert!(verdict.fillable.is_empty());
     assert_eq!(verdict.refused.len(), 2);
     let reason = verdict.refused[0].1[0].explain();
-    assert!(reason.contains("deferrable") && reason.contains("nullable"), "{reason}");
+    assert!(
+        reason.contains("deferrable") && reason.contains("nullable"),
+        "{reason}"
+    );
 
     // And prove the refusal was right: Postgres rejects the insert too.
-    let failed = db.client().batch_execute("INSERT INTO x (id, y_id) VALUES (1, 1);");
-    assert!(failed.is_err(), "the database should have rejected this as well");
+    let failed = db
+        .client()
+        .batch_execute("INSERT INTO x (id, y_id) VALUES (1, 1);");
+    assert!(
+        failed.is_err(),
+        "the database should have rejected this as well"
+    );
 }
 
 #[test]
@@ -237,7 +279,9 @@ fn enums_domains_and_arrays_come_back_as_themselves() {
 
     let mut client = db.client();
     let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
-    let t = schema.get(&pgsow::schema::TableId::new("public", "things")).unwrap();
+    let t = schema
+        .get(&pgsow::schema::TableId::new("public", "things"))
+        .unwrap();
 
     match &t.column("state").unwrap().type_ {
         pgsow::schema::ColumnType::Enum { labels, .. } => {
@@ -246,8 +290,14 @@ fn enums_domains_and_arrays_come_back_as_themselves() {
         other => panic!("expected an enum, got {other:?}"),
     }
 
-    assert!(t.column("contact").unwrap().type_.is_generatable(), "a plain domain is fine");
-    assert!(t.column("tags").unwrap().type_.is_generatable(), "text[] is fine");
+    assert!(
+        t.column("contact").unwrap().type_.is_generatable(),
+        "a plain domain is fine"
+    );
+    assert!(
+        t.column("tags").unwrap().type_.is_generatable(),
+        "text[] is fine"
+    );
 
     // A domain carrying a CHECK is a CHECK by another name, and gets the same
     // answer: refused rather than approximated.
@@ -255,7 +305,10 @@ fn enums_domains_and_arrays_come_back_as_themselves() {
 
     let order = pgsow::graph::order(&schema);
     let verdict = pgsow::classify::classify(&schema, &order);
-    assert!(verdict.refused[0].1.iter().any(|r| r.explain().contains("positive")));
+    assert!(verdict.refused[0]
+        .1
+        .iter()
+        .any(|r| r.explain().contains("positive")));
 }
 
 /// A unique index reaches the schema model as a unique key.
@@ -275,7 +328,9 @@ fn a_unique_index_is_read_as_the_key_it_is() {
     );
     let mut client = db.client();
     let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
-    let table = schema.get(&pgsow::schema::TableId::new("public", "oauth_applications")).unwrap();
+    let table = schema
+        .get(&pgsow::schema::TableId::new("public", "oauth_applications"))
+        .unwrap();
 
     let names: Vec<&str> = table.unique_keys.iter().map(|k| k.name.as_str()).collect();
     assert!(
@@ -286,7 +341,11 @@ fn a_unique_index_is_read_as_the_key_it_is() {
         !names.contains(&"index_oauth_applications_on_secret"),
         "a plain index is not a unique key: {names:?}"
     );
-    assert!(table.checks.is_empty(), "nothing here should refuse: {:?}", table.checks);
+    assert!(
+        table.checks.is_empty(),
+        "nothing here should refuse: {:?}",
+        table.checks
+    );
 }
 
 /// A unique index stays visible when a foreign key points at its column.
@@ -311,7 +370,9 @@ fn a_unique_index_referenced_by_a_foreign_key_is_still_read() {
     );
     let mut client = db.client();
     let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
-    let apps = schema.get(&pgsow::schema::TableId::new("public", "apps")).unwrap();
+    let apps = schema
+        .get(&pgsow::schema::TableId::new("public", "apps"))
+        .unwrap();
 
     let names: Vec<&str> = apps.unique_keys.iter().map(|k| k.name.as_str()).collect();
     assert!(

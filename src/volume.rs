@@ -33,7 +33,9 @@ pub fn domain_size(type_: &ColumnType) -> Option<usize> {
         // values the generator can produce, and asking it for more rows than
         // that under a unique constraint is the same impossible question a
         // boolean poses — just further along.
-        ColumnType::Text { max_length: Some(n) } => crate::generate::text_domain(*n),
+        ColumnType::Text {
+            max_length: Some(n),
+        } => crate::generate::text_domain(*n),
         // A domain is its inner type plus constraints. Constraints only ever
         // narrow it, so the inner type's size stays an upper bound.
         ColumnType::Domain { inner, .. } => domain_size(inner),
@@ -88,7 +90,9 @@ pub fn plan(
 ) -> BTreeMap<TableId, usize> {
     let mut counts: BTreeMap<TableId, usize> = BTreeMap::new();
     for id in order {
-        let Some(table) = schema.get(id) else { continue };
+        let Some(table) = schema.get(id) else {
+            continue;
+        };
         let asked = requested.for_table(id);
         let n = capacity(table, &counts).map_or(asked, |c| c.min(asked));
         counts.insert(id.clone(), n);
@@ -175,7 +179,11 @@ pub fn variations(table: &Table) -> BTreeMap<String, usize> {
         // Columns drawn from a parent are skipped: their values are whatever
         // the parent had, and `strides` walks those instead.
         let mut step = 1usize;
-        for name in key.columns.iter().filter(|c| covering_key(table, c).is_none()) {
+        for name in key
+            .columns
+            .iter()
+            .filter(|c| covering_key(table, c).is_none())
+        {
             out.entry(name.clone()).or_insert(step);
             match column_domain(table, name) {
                 // Bounded, so it wraps — the next column has to advance once
@@ -199,8 +207,11 @@ pub fn variations(table: &Table) -> BTreeMap<String, usize> {
 /// both keys composite, and every shared column bounded, since an unbounded
 /// column keeps its own key distinct on its own and needs no odometer.
 pub fn overlapping_keys(table: &Table) -> Option<(String, String)> {
-    let composite: Vec<&UniqueKey> =
-        table.unique_keys.iter().filter(|k| k.columns.len() > 1).collect();
+    let composite: Vec<&UniqueKey> = table
+        .unique_keys
+        .iter()
+        .filter(|k| k.columns.len() > 1)
+        .collect();
     for (index, first) in composite.iter().enumerate() {
         for second in &composite[index + 1..] {
             let shared: Vec<&String> = first
@@ -248,10 +259,7 @@ pub fn overlapping_keys(table: &Table) -> Option<(String, String)> {
 /// by one odometer. The narrower is chosen and the other is left to the
 /// database, which will reject rather than accept a duplicate. Loud, not
 /// silent, but it is a gap.
-pub fn strides(
-    table: &Table,
-    written: &BTreeMap<TableId, usize>,
-) -> BTreeMap<String, usize> {
+pub fn strides(table: &Table, written: &BTreeMap<TableId, usize>) -> BTreeMap<String, usize> {
     let Some(key) = joining_key(table, written) else {
         return BTreeMap::new();
     };
@@ -275,21 +283,22 @@ pub fn strides(
 }
 
 /// The narrowest unique key whose every column comes from a foreign key.
-fn joining_key<'t>(
-    table: &'t Table,
-    written: &BTreeMap<TableId, usize>,
-) -> Option<&'t UniqueKey> {
+fn joining_key<'t>(table: &'t Table, written: &BTreeMap<TableId, usize>) -> Option<&'t UniqueKey> {
     table
         .unique_keys
         .iter()
         .filter(|key| {
             key.columns.len() > 1
                 && key.columns.iter().all(|c| {
-                    covering_key(table, c)
-                        .is_some_and(|fk| written.contains_key(&fk.references))
+                    covering_key(table, c).is_some_and(|fk| written.contains_key(&fk.references))
                 })
         })
-        .min_by_key(|key| (key_capacity(table, key, written).unwrap_or(usize::MAX), &key.name))
+        .min_by_key(|key| {
+            (
+                key_capacity(table, key, written).unwrap_or(usize::MAX),
+                &key.name,
+            )
+        })
 }
 
 #[cfg(test)]
@@ -311,7 +320,10 @@ mod tests {
 
     fn table(name: &str, columns: Vec<Column>) -> Table {
         Table {
-            id: TableId { schema: "public".into(), name: name.into() },
+            id: TableId {
+                schema: "public".into(),
+                name: name.into(),
+            },
             columns,
             foreign_keys: vec![],
             unique_keys: vec![],
@@ -328,7 +340,10 @@ mod tests {
     }
 
     fn parent(name: &str) -> TableId {
-        TableId { schema: "public".into(), name: name.into() }
+        TableId {
+            schema: "public".into(),
+            name: name.into(),
+        }
     }
 
     #[test]
@@ -395,9 +410,14 @@ mod tests {
                 col("flag", ColumnType::Boolean),
             ],
         );
-        t.unique_keys.push(unique("by_flag_and_uid", &["flag", "uid"]));
+        t.unique_keys
+            .push(unique("by_flag_and_uid", &["flag", "uid"]));
         t.unique_keys.push(unique("by_uid", &["uid"]));
-        assert_eq!(variations(&t).get("uid"), Some(&1), "uid must change every row");
+        assert_eq!(
+            variations(&t).get("uid"),
+            Some(&1),
+            "uid must change every row"
+        );
     }
 
     #[test]
@@ -423,7 +443,8 @@ mod tests {
             referenced_columns: vec!["id".into()],
             deferrable: false,
         });
-        t.unique_keys.push(unique("grants_pkey", &["user_id", "role_id"]));
+        t.unique_keys
+            .push(unique("grants_pkey", &["user_id", "role_id"]));
 
         let written = BTreeMap::from([(parent("users"), 10), (parent("roles"), 2)]);
         assert_eq!(capacity(&t, &written), Some(20));
@@ -462,7 +483,10 @@ mod tests {
     fn an_unwritten_parent_gives_no_bound_rather_than_a_wrong_one() {
         // A self-reference, or a parent that was refused. Guessing zero here
         // would silently produce an empty table.
-        let mut t = table("child", vec![col("parent_id", ColumnType::Integer { bytes: 4 })]);
+        let mut t = table(
+            "child",
+            vec![col("parent_id", ColumnType::Integer { bytes: 4 })],
+        );
         t.foreign_keys.push(ForeignKey {
             name: "fk".into(),
             columns: vec!["parent_id".into()],

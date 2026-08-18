@@ -57,7 +57,11 @@ pub fn bounds_for(table: &Table) -> BTreeMap<String, Bounds> {
             Meaning::ByteLength { column, exact } => {
                 out.entry(column).or_default().exact_bytes = Some(exact);
             }
-            Meaning::LowerBound { column, min, inclusive } => {
+            Meaning::LowerBound {
+                column,
+                min,
+                inclusive,
+            } => {
                 let floor = if inclusive { min } else { min + 1 };
                 let entry = out.entry(column).or_default();
                 entry.min = Some(entry.min.map_or(floor, |m: i64| m.max(floor)));
@@ -193,8 +197,8 @@ fn stream(seed: u64, table: &TableId, column: &str, row: usize) -> ChaCha8Rng {
 /// not realistic data, and pretending otherwise invites somebody to demo with
 /// it.
 const WORDS: [&str; 16] = [
-    "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
-    "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+    "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet",
+    "kilo", "lima", "mike", "november", "oscar", "papa",
 ];
 
 /// A date `n` days after 2020-01-01, as `YYYY-MM-DD`.
@@ -289,7 +293,11 @@ fn render(
         // rolls of a coin agree half the time, and the row count is capped at
         // two anyway by `volume`.
         ColumnType::Boolean => {
-            let b = if unique { step % 2 == 1 } else { rng.gen::<bool>() };
+            let b = if unique {
+                step % 2 == 1
+            } else {
+                rng.gen::<bool>()
+            };
             Literal(if b { "true" } else { "false" }.into())
         }
 
@@ -319,7 +327,11 @@ fn render(
             // Stepping by a fraction rather than a whole number, so a unique
             // float column does not collide with a unique integer one beside
             // it for no reason.
-            let offset = if unique { step as f64 / 16.0 } else { rng.gen_range(0.0..1000.0) };
+            let offset = if unique {
+                step as f64 / 16.0
+            } else {
+                rng.gen_range(0.0..1000.0)
+            };
             Literal(format!("{:.4}", floor + offset))
         }
 
@@ -396,7 +408,11 @@ fn render(
             let hex = format!("{a:016x}{b:016x}");
             Literal::text(&format!(
                 "{}-{}-{}-{}-{}",
-                &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]
+                &hex[0..8],
+                &hex[8..12],
+                &hex[12..16],
+                &hex[16..20],
+                &hex[20..32]
             ))
         }
 
@@ -411,7 +427,11 @@ fn render(
         })),
 
         ColumnType::Time => {
-            let seconds = if unique { step % 86_400 } else { rng.gen_range(0..86_400) };
+            let seconds = if unique {
+                step % 86_400
+            } else {
+                rng.gen_range(0..86_400)
+            };
             Literal::text(&format!(
                 "{:02}:{:02}:{:02}",
                 seconds / 3600,
@@ -421,7 +441,11 @@ fn render(
         }
 
         ColumnType::Timestamp { with_zone } => {
-            let seconds = if unique { step } else { rng.gen_range(0..315_360_000) };
+            let seconds = if unique {
+                step
+            } else {
+                rng.gen_range(0..315_360_000)
+            };
             let stamp = format!(
                 "{} {:02}:{:02}:{:02}",
                 days_from_epoch(seconds / 86_400),
@@ -429,7 +453,11 @@ fn render(
                 (seconds / 60) % 60,
                 seconds % 60
             );
-            Literal::text(&if *with_zone { format!("{stamp}+00") } else { stamp })
+            Literal::text(&if *with_zone {
+                format!("{stamp}+00")
+            } else {
+                stamp
+            })
         }
 
         ColumnType::Interval => Literal::text(&format!(
@@ -455,7 +483,12 @@ fn render(
             // Two values and one value respectively: these cannot be made
             // distinct beyond that, and `volume` is what stops more being
             // asked of them.
-            (Some("boolean"), _) => if unique && step % 2 == 1 { "false" } else { "true" }.into(),
+            (Some("boolean"), _) => if unique && step % 2 == 1 {
+                "false"
+            } else {
+                "true"
+            }
+            .into(),
             (Some("null"), _) => "null".into(),
             (_, false) => "{}".into(),
             (_, true) => format!("{{\"n\": {step}}}"),
@@ -468,11 +501,7 @@ fn render(
             // more than a byte ceiling allows, since `octet_length(col) <= N`
             // is a real limit on a bytea and not only on text.
             let ceiling = bounds.max_length.unwrap_or(i32::MAX);
-            let width = bounds
-                .exact_bytes
-                .unwrap_or(8)
-                .min(ceiling)
-                .clamp(0, 4096) as usize;
+            let width = bounds.exact_bytes.unwrap_or(8).min(ceiling).clamp(0, 4096) as usize;
             let mut hex = String::with_capacity(width * 2);
             for byte in 0..width {
                 // A unique column spells the step out in its leading bytes, so
@@ -491,18 +520,30 @@ fn render(
             use crate::schema::NetworkKind;
             Literal::text(&match kind {
                 NetworkKind::Inet if unique => format!(
-                    "10.{}.{}.{}", (step / 65_536) % 256, (step / 256) % 256,
-                    (step % 254) + 1),
+                    "10.{}.{}.{}",
+                    (step / 65_536) % 256,
+                    (step / 256) % 256,
+                    (step % 254) + 1
+                ),
                 NetworkKind::Inet => format!(
-                    "10.{}.{}.{}", rng.gen_range(0..256), rng.gen_range(0..256),
-                    rng.gen_range(1..255)),
+                    "10.{}.{}.{}",
+                    rng.gen_range(0..256),
+                    rng.gen_range(0..256),
+                    rng.gen_range(1..255)
+                ),
                 // A cidr must have zeroes in the host part or Postgres rejects
                 // it outright, which /24 on a .0 address guarantees.
-                NetworkKind::Cidr => format!("10.{}.{}.0/24",
-                    rng.gen_range(0..256), rng.gen_range(0..256)),
+                NetworkKind::Cidr => format!(
+                    "10.{}.{}.0/24",
+                    rng.gen_range(0..256),
+                    rng.gen_range(0..256)
+                ),
                 NetworkKind::MacAddr => format!(
                     "08:00:2b:{:02x}:{:02x}:{:02x}",
-                    rng.gen::<u8>(), rng.gen::<u8>(), rng.gen::<u8>()),
+                    rng.gen::<u8>(),
+                    rng.gen::<u8>(),
+                    rng.gen::<u8>()
+                ),
             })
         }
 
@@ -610,7 +651,12 @@ mod tests {
 
     #[test]
     fn a_length_limit_is_never_exceeded() {
-        let c = column("code", ColumnType::Text { max_length: Some(4) });
+        let c = column(
+            "code",
+            ColumnType::Text {
+                max_length: Some(4),
+            },
+        );
         for row in 0..50 {
             let rendered = generate(&c, row, &Bounds::default());
             let inner = rendered.trim_matches('\'');
@@ -621,18 +667,32 @@ mod tests {
     #[test]
     fn the_tighter_of_two_length_limits_wins() {
         // A varchar(40) carrying CHECK (char_length(x) <= 5) has to respect 5.
-        let c = column("code", ColumnType::Text { max_length: Some(40) });
-        let bounds = Bounds { max_length: Some(5), ..Bounds::default() };
+        let c = column(
+            "code",
+            ColumnType::Text {
+                max_length: Some(40),
+            },
+        );
+        let bounds = Bounds {
+            max_length: Some(5),
+            ..Bounds::default()
+        };
         for row in 0..50 {
             let rendered = generate(&c, row, &bounds);
-            assert!(rendered.trim_matches('\'').chars().count() <= 5, "{rendered}");
+            assert!(
+                rendered.trim_matches('\'').chars().count() <= 5,
+                "{rendered}"
+            );
         }
     }
 
     #[test]
     fn a_lower_bound_is_respected_and_exclusive_means_strictly_above() {
         let c = column("n", ColumnType::Integer { bytes: 4 });
-        let bounds = Bounds { min: Some(100), ..Bounds::default() };
+        let bounds = Bounds {
+            min: Some(100),
+            ..Bounds::default()
+        };
         for row in 0..50 {
             let n: i64 = generate(&c, row, &bounds).parse().unwrap();
             assert!(n >= 100, "{n}");
@@ -652,7 +712,13 @@ mod tests {
     fn a_numeric_fits_its_declared_precision() {
         // numeric(5,2) holds at most 999.99. Generating 1000.00 for it fails at
         // insert time, on exactly the schemas careful enough to declare limits.
-        let c = column("amount", ColumnType::Numeric { precision: Some(5), scale: Some(2) });
+        let c = column(
+            "amount",
+            ColumnType::Numeric {
+                precision: Some(5),
+                scale: Some(2),
+            },
+        );
         for row in 0..100 {
             let rendered = generate(&c, row, &Bounds::default());
             let whole: i64 = rendered.split('.').next().unwrap().parse().unwrap();
@@ -663,16 +729,24 @@ mod tests {
     #[test]
     fn a_byte_width_check_produces_exactly_that_many_bytes() {
         let c = column("digest", ColumnType::Bytea);
-        let bounds = Bounds { exact_bytes: Some(20), ..Bounds::default() };
+        let bounds = Bounds {
+            exact_bytes: Some(20),
+            ..Bounds::default()
+        };
         let rendered = generate(&c, 0, &bounds);
-        let hex = rendered.trim_start_matches("'\\x").trim_end_matches("'::bytea");
+        let hex = rendered
+            .trim_start_matches("'\\x")
+            .trim_end_matches("'::bytea");
         assert_eq!(hex.len(), 40, "20 bytes is 40 hex characters: {rendered}");
     }
 
     #[test]
     fn a_column_that_must_be_null_is_null_whatever_its_type() {
         let c = column("file_md5", ColumnType::Bytea);
-        let bounds = Bounds { must_be_null: true, ..Bounds::default() };
+        let bounds = Bounds {
+            must_be_null: true,
+            ..Bounds::default()
+        };
         assert_eq!(generate(&c, 0, &bounds), "NULL");
     }
 
@@ -688,11 +762,14 @@ mod tests {
 
     #[test]
     fn an_enum_only_ever_produces_one_of_its_labels() {
-        let c = column("state", ColumnType::Enum {
-            name: "status".into(),
-            qualified: None,
-            labels: vec!["pending".into(), "shipped".into()],
-        });
+        let c = column(
+            "state",
+            ColumnType::Enum {
+                name: "status".into(),
+                qualified: None,
+                labels: vec!["pending".into(), "shipped".into()],
+            },
+        );
         for row in 0..50 {
             let v = generate(&c, row, &Bounds::default());
             assert!(v == "'pending'" || v == "'shipped'", "{v}");

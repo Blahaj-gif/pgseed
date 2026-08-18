@@ -29,8 +29,10 @@ fn seed(ddl: &str, rows: usize) -> (Db, String) {
     let sql = emit::sql(&schema, &verdict, &emit::Options::flat(1, rows));
 
     if let Err(e) = db.client().batch_execute(&sql) {
-        panic!("Postgres rejected generated data — that is the whole failure this \
-                project is about.\n\nerror: {e}\n\nsql:\n{sql}");
+        panic!(
+            "Postgres rejected generated data — that is the whole failure this \
+                project is about.\n\nerror: {e}\n\nsql:\n{sql}"
+        );
     }
     (db, sql)
 }
@@ -188,7 +190,10 @@ fn a_refused_table_is_left_completely_untouched() {
          );",
         10,
     );
-    assert!(!sql.contains("targets"), "a refused table appeared in the SQL");
+    assert!(
+        !sql.contains("targets"),
+        "a refused table appeared in the SQL"
+    );
     assert_eq!(count(&db, "ok"), 10);
     assert_eq!(count(&db, "targets"), 0);
 }
@@ -266,7 +271,10 @@ fn a_failed_apply_leaves_the_database_exactly_as_it_was() {
         .unwrap();
 
     let failed = emit::apply(&mut client, &schema, &verdict, &emit::Options::flat(1, 5));
-    assert!(failed.is_err(), "a primary key collision should have failed");
+    assert!(
+        failed.is_err(),
+        "a primary key collision should have failed"
+    );
     assert_eq!(count(&db, "users"), 1, "the transaction did not roll back");
 }
 
@@ -289,15 +297,26 @@ fn a_cycle_broken_with_a_null_is_filled_in_afterwards() {
     let verdict = classify::classify(&schema, &order);
     emit::apply(&mut client, &schema, &verdict, &emit::Options::flat(1, 10)).unwrap();
 
-    let with_manager: i64 = db.client()
-        .query_one("SELECT count(*) FROM employees WHERE manager_id IS NOT NULL", &[])
+    let with_manager: i64 = db
+        .client()
+        .query_one(
+            "SELECT count(*) FROM employees WHERE manager_id IS NOT NULL",
+            &[],
+        )
         .unwrap()
         .get(0);
-    assert_eq!(with_manager, 9, "every row but the root should report to somebody");
+    assert_eq!(
+        with_manager, 9,
+        "every row but the root should report to somebody"
+    );
 
     // And exactly one root, or it is a closed loop rather than a hierarchy.
-    let roots: i64 = db.client()
-        .query_one("SELECT count(*) FROM employees WHERE manager_id IS NULL", &[])
+    let roots: i64 = db
+        .client()
+        .query_one(
+            "SELECT count(*) FROM employees WHERE manager_id IS NULL",
+            &[],
+        )
         .unwrap()
         .get(0);
     assert_eq!(roots, 1);
@@ -321,8 +340,16 @@ fn a_unique_column_cannot_hold_more_values_than_its_type_has() {
     // Exactly the domain, not merely no more than it — `<=` would also pass
     // on a table it gave up on and left empty, which is a different answer
     // wearing the same number.
-    assert_eq!(count(&db, "flags"), 2, "a bool holds two rows, both of them");
-    assert_eq!(count(&db, "moods"), 3, "an enum of three labels holds three");
+    assert_eq!(
+        count(&db, "flags"),
+        2,
+        "a bool holds two rows, both of them"
+    );
+    assert_eq!(
+        count(&db, "moods"),
+        3,
+        "an enum of three labels holds three"
+    );
 }
 
 /// A join table can hold at most as many rows as there are pairs to join.
@@ -347,7 +374,10 @@ fn a_join_table_cannot_have_more_rows_than_the_pairs_available() {
     // And they are 20 *distinct* pairs, which is the thing the odometer buys.
     let distinct: i64 = db
         .client()
-        .query_one("SELECT count(*) FROM (SELECT DISTINCT user_id, role_id FROM grants) d", &[])
+        .query_one(
+            "SELECT count(*) FROM (SELECT DISTINCT user_id, role_id FROM grants) d",
+            &[],
+        )
         .unwrap()
         .get(0);
     assert_eq!(distinct, 20, "the pairs repeated");
@@ -396,8 +426,14 @@ fn a_constant_default_under_a_unique_key_is_written_rather_than_defaulted() {
         6,
     );
     assert_eq!(count(&db, "metadata"), 6);
-    assert!(sql.contains("resource_version"), "it was left to the default");
-    assert!(!sql.contains("\"id\""), "a sequence default should be left alone: {sql}");
+    assert!(
+        sql.contains("resource_version"),
+        "it was left to the default"
+    );
+    assert!(
+        !sql.contains("\"id\""),
+        "a sequence default should be left alone: {sql}"
+    );
 
     // The sequence and the rows must still agree, or the next real insert
     // collides with a row this wrote.
@@ -468,11 +504,22 @@ fn an_exclusion_constraint_refuses_its_table_rather_than_guessing() {
     let verdict = classify::classify(&schema, &order);
 
     assert!(verdict.is_refused(&pgsow::schema::TableId::new("public", "sprints")));
-    assert_eq!(verdict.fillable.len(), 1, "the plain table is untouched by this");
+    assert_eq!(
+        verdict.fillable.len(),
+        1,
+        "the plain table is untouched by this"
+    );
 
-    let (_, reasons) = verdict.refused.iter().find(|(t, _)| t.name == "sprints").unwrap();
+    let (_, reasons) = verdict
+        .refused
+        .iter()
+        .find(|(t, _)| t.name == "sprints")
+        .unwrap();
     let text = reasons[0].explain();
-    assert!(text.contains("EXCLUDE"), "the rule should be quoted back: {text}");
+    assert!(
+        text.contains("EXCLUDE"),
+        "the rule should be quoted back: {text}"
+    );
 }
 
 /// The speed gate, pre-registered: fourteen tables at fifty rows, under 2s.
@@ -495,11 +542,20 @@ fn fourteen_tables_at_fifty_rows_generate_inside_the_budget() {
     let sql = emit::sql(&schema, &verdict, &emit::Options::flat(1, 50));
     let elapsed = started.elapsed();
 
-    println!("  14 tables x 50 rows: {:?} for {} bytes", elapsed, sql.len());
-    assert!(elapsed.as_secs_f64() < 2.0, "the gate is 2s, this took {elapsed:?}");
+    println!(
+        "  14 tables x 50 rows: {:?} for {} bytes",
+        elapsed,
+        sql.len()
+    );
+    assert!(
+        elapsed.as_secs_f64() < 2.0,
+        "the gate is 2s, this took {elapsed:?}"
+    );
 
     // And the output still has to be real, or the timing measured nothing.
-    db.client().batch_execute(&sql).expect("its own output did not run");
+    db.client()
+        .batch_execute(&sql)
+        .expect("its own output did not run");
     assert_eq!(count(&db, "order_items"), 50);
 }
 
@@ -530,8 +586,14 @@ fn adding_a_table_does_not_disturb_the_ones_already_there() {
         "{base} CREATE TABLE unrelated (id int PRIMARY KEY, note text);"
     ));
 
-    let users_before = before.lines().skip_while(|l| !l.contains("\"users\"")).take(13);
-    let users_after = after.lines().skip_while(|l| !l.contains("\"users\"")).take(13);
+    let users_before = before
+        .lines()
+        .skip_while(|l| !l.contains("\"users\""))
+        .take(13);
+    let users_after = after
+        .lines()
+        .skip_while(|l| !l.contains("\"users\""))
+        .take(13);
     assert!(
         users_before.eq(users_after),
         "adding an unrelated table moved the values in users"
@@ -563,7 +625,11 @@ fn a_narrow_unique_column_is_not_quietly_overfilled() {
     // Four base-36 characters hold well over fifty values, so all fifty fit.
     assert_eq!(count(&db, "codes"), 50);
     // One character holds 36, and asking for fifty is the impossible question.
-    assert_eq!(count(&db, "tight"), 36, "a single character holds 36 of them");
+    assert_eq!(
+        count(&db, "tight"),
+        36,
+        "a single character holds 36 of them"
+    );
     // The same limit written as a CHECK is the same limit.
     assert_eq!(count(&db, "checked"), 50, "36 * 36 leaves room for fifty");
 }
@@ -644,7 +710,10 @@ fn two_columns_that_both_must_hold_a_value_cannot_have_one_between_them() {
     let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
     let order = graph::order(&schema);
     let verdict = classify::classify(&schema, &order);
-    assert!(verdict.fillable.is_empty(), "there is no choice to make here");
+    assert!(
+        verdict.fillable.is_empty(),
+        "there is no choice to make here"
+    );
     assert!(verdict.refused[0].1[0].explain().contains("num_nonnulls"));
 }
 
@@ -673,7 +742,10 @@ fn a_composite_key_of_narrow_columns_is_walked_rather_than_guessed() {
     // All six, not the same one six times.
     let pairs: i64 = db
         .client()
-        .query_one("SELECT count(*) FROM (SELECT DISTINCT flag, status FROM narrow) d", &[])
+        .query_one(
+            "SELECT count(*) FROM (SELECT DISTINCT flag, status FROM narrow) d",
+            &[],
+        )
         .unwrap()
         .get(0);
     assert_eq!(pairs, 6);
@@ -709,9 +781,16 @@ fn two_keys_that_contend_for_one_column_are_refused_rather_than_hoped_over() {
     let order = graph::order(&schema);
     let verdict = classify::classify(&schema, &order);
 
-    let (_, reasons) = verdict.refused.iter().find(|(t, _)| t.name == "contended")
+    let (_, reasons) = verdict
+        .refused
+        .iter()
+        .find(|(t, _)| t.name == "contended")
         .expect("two narrow keys contending should be refused");
-    assert!(reasons[0].explain().contains("share a column"), "{:?}", reasons[0]);
+    assert!(
+        reasons[0].explain().contains("share a column"),
+        "{:?}",
+        reasons[0]
+    );
 
     // And a table whose keys each have a column with room to spare is fine:
     // each carries its own key and they never contend.
@@ -743,4 +822,49 @@ fn a_cycle_is_repaired_on_a_table_keyed_by_something_min_cannot_take() {
         .unwrap()
         .get(0);
     assert_eq!(roots, 1, "every row but the root should point somewhere");
+}
+
+/// Two rules that cannot both be kept.
+///
+/// GitLab's `ai_tool_rules` says each of three permission columns may be
+/// `NULL or one of a list` — which this satisfies by writing NULL — and
+/// separately that at least one of the three must not be null. Read one at a
+/// time both are satisfiable; together no row satisfies them, and the table
+/// has to be refused rather than attempted.
+#[test]
+fn a_column_obliged_to_be_null_cannot_also_be_the_one_holding_a_value() {
+    let db = Db::start();
+    db.apply(
+        "CREATE TABLE ai_tool_rules (
+             id bigint PRIMARY KEY,
+             web_access   smallint,
+             local_access smallint,
+             CONSTRAINT web_enum   CHECK (((web_access IS NULL) OR (web_access = ANY (ARRAY[0, 1])))),
+             CONSTRAINT local_enum CHECK (((local_access IS NULL) OR (local_access = ANY (ARRAY[0, 1])))),
+             CONSTRAINT has_permission CHECK (((web_access IS NOT NULL) OR (local_access IS NOT NULL)))
+         );
+         CREATE TABLE fine (
+             id bigint PRIMARY KEY,
+             a smallint,
+             b smallint,
+             CONSTRAINT a_enum CHECK (((a IS NULL) OR (a = ANY (ARRAY[0, 1])))),
+             CONSTRAINT one_of CHECK (((a IS NOT NULL) OR (b IS NOT NULL)))
+         );",
+    );
+
+    let mut client = db.client();
+    let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = graph::order(&schema);
+    let verdict = classify::classify(&schema, &order);
+
+    assert!(
+        verdict.is_refused(&pgsow::schema::TableId::new("public", "ai_tool_rules")),
+        "no row satisfies both rules, so the table must be named"
+    );
+    // `b` is free, so one column can still hold the value and this one works.
+    assert!(
+        verdict.fillable.iter().any(|t| t.name == "fine"),
+        "one unconstrained column is enough: {:?}",
+        verdict.refused
+    );
 }

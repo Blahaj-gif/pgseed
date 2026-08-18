@@ -31,9 +31,15 @@ impl Db {
             ..Settings::default()
         };
         let mut postgres = PostgreSQL::new(settings);
-        postgres.setup().expect("could not set up an embedded postgres");
-        postgres.start().expect("could not start the embedded postgres");
-        postgres.create_database("pgsow_test").expect("could not create the test database");
+        postgres
+            .setup()
+            .expect("could not set up an embedded postgres");
+        postgres
+            .start()
+            .expect("could not start the embedded postgres");
+        postgres
+            .create_database("pgsow_test")
+            .expect("could not create the test database");
         let url = postgres.settings().url("pgsow_test");
         Db { postgres, url }
     }

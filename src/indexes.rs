@@ -44,7 +44,17 @@ pub enum Requirement {
     /// order, with the plain columns kept where they sit. Those columns must
     /// also be generated in lower case, which they already are, and which
     /// `Lowercase` records rather than assuming.
-    Lowered { columns: Vec<String>, lowered: Vec<String> },
+    Lowered {
+        columns: Vec<String>,
+        lowered: Vec<String>,
+    },
+    /// Every key is an expression that **cannot fail**, but not one whose
+    /// distinctness can be reasoned about.
+    ///
+    /// Enough for a non-unique index, which enforces nothing and rejects rows
+    /// only when its expression refuses to evaluate. Not enough for a unique
+    /// one, which is asking a question this cannot answer.
+    Harmless,
     /// Anything else at all.
     Unknown,
 }
@@ -81,9 +91,9 @@ fn top_level_parts(text: &str) -> Vec<&str> {
 /// applies to, so treating it as applying to all of them is the strict
 /// reading and the safe one.
 fn key_list(definition: &str) -> Option<&str> {
-    let open = definition.find(" USING ").and_then(|at| {
-        definition[at..].find('(').map(|offset| at + offset)
-    })?;
+    let open = definition
+        .find(" USING ")
+        .and_then(|at| definition[at..].find('(').map(|offset| at + offset))?;
     let mut depth = 0i32;
     let mut quoted = false;
     for (index, ch) in definition[open..].char_indices() {
@@ -113,12 +123,13 @@ fn column(text: &str) -> Option<String> {
     // to prevent, and which this comment exists because a test caught.
     let text = match text.split_once("::") {
         Some((left, right)) => {
-            let right = right.trim();
-            let type_name = !right.is_empty()
-                && right
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ');
-            if !type_name {
+            // Only a cast that keeps distinctness. `(name)::text` is the
+            // column `name` for every purpose here, but `(created_at)::date`
+            // maps many timestamps onto one day — and reading it as the bare
+            // column claims a unique index on it is satisfied by making
+            // `created_at` distinct, which it is not.
+            let target = right.trim().trim_end_matches("[]").to_ascii_lowercase();
+            if !TOTAL_CASTS.contains(&target.as_str()) {
                 return None;
             }
             unwrap(left.trim())
@@ -129,7 +140,10 @@ fn column(text: &str) -> Option<String> {
         return Some(inner.replace("\"\"", "\""));
     }
     let ok = !text.is_empty()
-        && text.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && text
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
         && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     ok.then(|| text.to_string())
 }
@@ -214,6 +228,146 @@ fn strip_modifiers(part: &str) -> &str {
     }
 }
 
+/// Functions that cannot fail, whatever they are handed.
+///
+/// This is the closed set that makes a non-unique expression index safe to
+/// ignore. `lower` of any text is text; `split_part` past the end is the empty
+/// string; an array subscript out of range is NULL. None of them can refuse a
+/// row, so an index built on them cannot either.
+///
+/// Deliberately short. `to_date` is not here and never will be, because
+/// `to_date('bogus', 'YYYY-MM-DD')` raises — and a function that raises on
+/// some inputs is exactly the kind that rejects a row.
+/// The SQL string delimiter, written as a code point so that quoting it
+/// through three layers of tooling stops being a source of bugs.
+const QUOTE: char = '\u{27}';
+
+const TOTAL_FUNCTIONS: [&str; 17] = [
+    "lower",
+    "upper",
+    "btrim",
+    "ltrim",
+    "rtrim",
+    "split_part",
+    "coalesce",
+    "md5",
+    "char_length",
+    "length",
+    "octet_length",
+    "concat",
+    "concat_ws",
+    "abs",
+    "greatest",
+    "least",
+    "jsonb_typeof",
+];
+
+/// Casts that cannot fail. Anything at all can be rendered as text; the other
+/// direction — text to `jsonb`, to `integer`, to `date` — is where a cast
+/// refuses a row, and Discourse has an index that does.
+const TOTAL_CASTS: [&str; 4] = ["text", "varchar", "character varying", "citext"];
+
+/// Whether an expression can be shown never to fail.
+///
+/// Structural, like everything else here: a column, a literal, a subscript, a
+/// null test, a cast to text, or a call to one of the functions above with
+/// arguments that are themselves total. No evaluation, and an unrecognised
+/// function name is not total by default.
+fn is_total(expression: &str) -> bool {
+    let text = unwrap(expression.trim());
+    if text.is_empty() {
+        return false;
+    }
+
+    // A literal: a quoted string or a number.
+    if text.starts_with(QUOTE) && text.ends_with(QUOTE) && text.len() >= 2 {
+        return true;
+    }
+    if text
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+    {
+        return true;
+    }
+
+    // A cast, which is only total in the one direction.
+    if let Some((left, right)) = split_last_cast(text) {
+        let target = right.trim().trim_end_matches("[]").to_ascii_lowercase();
+        return TOTAL_CASTS.contains(&target.as_str()) && is_total(left);
+    }
+
+    // A null test. Total for anything, and it yields a boolean.
+    for suffix in ["IS NOT NULL", "IS NULL"] {
+        if let Some(inner) = text.strip_suffix(suffix) {
+            return is_total(inner);
+        }
+    }
+
+    // An array subscript. Out of range is NULL rather than an error.
+    if let Some((base, index)) = text.strip_suffix(']').and_then(|t| t.rsplit_once('[')) {
+        return is_total(base) && is_total(index);
+    }
+
+    // A plain column.
+    if column(text).is_some() {
+        return true;
+    }
+
+    // A call to a function that cannot fail, on arguments that cannot either.
+    if let Some((name, arguments)) = call_parts(text) {
+        return TOTAL_FUNCTIONS.contains(&name.to_ascii_lowercase().as_str())
+            && top_level_parts(arguments).iter().all(|a| is_total(a));
+    }
+
+    false
+}
+
+/// Split off a trailing `::type` at the top level, if there is one.
+fn split_last_cast(text: &str) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    let mut quoted = false;
+    let mut found = None;
+    let bytes = text.as_bytes();
+    for index in 0..bytes.len() {
+        match bytes[index] {
+            b if b == QUOTE as u8 => quoted = !quoted,
+            b'(' if !quoted => depth += 1,
+            b')' if !quoted => depth -= 1,
+            b':' if !quoted && depth == 0 && text[index..].starts_with("::") => {
+                found = Some(index);
+            }
+            _ => {}
+        }
+    }
+    found.map(|at| (&text[..at], &text[at + 2..]))
+}
+
+/// A call as (name, arguments), if the text is exactly one.
+fn call_parts(text: &str) -> Option<(&str, &str)> {
+    let open = text.find('(')?;
+    let name = text[..open].trim();
+    if name.is_empty()
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || !text.trim_end().ends_with(')')
+    {
+        return None;
+    }
+    let inner = &text[open + 1..text.trim_end().len() - 1];
+    // The parentheses must balance inside, or `f(a) + g(b)` parses as a call.
+    let mut depth = 0i32;
+    for ch in inner.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return None;
+        }
+    }
+    (depth == 0).then_some((name, inner))
+}
+
 /// Read what an index requires, from the text `pg_get_indexdef` returned.
 pub fn interpret(definition: &str) -> Requirement {
     let Some(keys) = key_list(definition) else {
@@ -236,7 +390,16 @@ pub fn interpret(definition: &str) -> Requirement {
             lowered.push(name);
             continue;
         }
-        return Requirement::Unknown;
+        // Not a shape whose distinctness can be reasoned about. It may still
+        // be one that cannot fail, which is all a non-unique index needs.
+        return if top_level_parts(keys)
+            .iter()
+            .all(|p| is_total(strip_modifiers(p)))
+        {
+            Requirement::Harmless
+        } else {
+            Requirement::Unknown
+        };
     }
 
     if columns.is_empty() {
@@ -360,39 +523,73 @@ mod tests {
 
     #[test]
     fn a_type_name_with_spaces_is_not_mistaken_for_a_modifier() {
-        // A cast to a multi-word type is still just the column, and the
-        // modifier stripper must not take the `zone` for an operator class.
-        // Only words ending in `_ops` are stripped, which is why it does not.
-        //
-        // This test first asserted `Unknown`, which was wrong about the code
-        // rather than the other way round.
+        // The point of this one is the *stripper*: `zone` must not be taken
+        // for an operator class, and it is not, because only words ending in
+        // `_ops` are. The result is `Unknown` rather than a column because a
+        // cast to a timestamp does not keep distinctness, which is a separate
+        // and equally deliberate decision.
         assert_eq!(
             on("CREATE INDEX i ON t USING btree (((a)::timestamp with time zone))"),
-            columns(&["a"])
+            Requirement::Unknown
         );
+        // The stripper working, shown on a cast that does keep distinctness.
         assert_eq!(
-            on("CREATE INDEX i ON t USING btree (((a)::timestamp with time zone) DESC)"),
+            on("CREATE INDEX i ON t USING btree (((a)::character varying) DESC)"),
             columns(&["a"])
         );
     }
 
     #[test]
     fn everything_outside_the_set_is_unknown() {
-        // Each of these is a real rule, and none of them is approximated. The
-        // casts are the reason the first attempt at this existed at all: a
-        // cast can fail, and a failing cast rejects the row.
+        // A cast away from text can fail, and a failing cast rejects the row —
+        // which is the whole reason expression indexes are read at all. An
+        // operator is not a call, and a function not on the list is not
+        // assumed to be total just because it looks harmless.
         for definition in [
             "CREATE INDEX i ON t USING btree ((((data)::jsonb ->> 'x'::text)))",
-            "CREATE INDEX i ON t USING btree ((ids[1]), created_at)",
-            "CREATE INDEX i ON t USING btree (a, ((b IS NULL)))",
-            "CREATE INDEX i ON t USING btree (upper(a))",
-            "CREATE INDEX i ON t USING btree (md5(a))",
-            "CREATE INDEX i ON t USING btree ((a + b))",
+            "CREATE INDEX i ON t USING btree (((a + b)))",
             "CREATE INDEX i ON t USING gin (to_tsvector('english'::regconfig, a))",
             "CREATE INDEX i ON t USING btree (jsonb_array_length(COALESCE(a, '[]')))",
+            "CREATE INDEX i ON t USING btree (to_date(a, 'YYYY-MM-DD'::text))",
+            "CREATE INDEX i ON t USING btree (((a)::integer))",
         ] {
             assert_eq!(interpret(definition), Requirement::Unknown, "{definition}");
         }
+    }
+
+    #[test]
+    fn an_expression_that_cannot_fail_is_harmless_when_nothing_is_unique() {
+        // These constrain nothing at all on a non-unique index: an array
+        // subscript out of range is NULL, `split_part` past the end is the
+        // empty string, a null test is a boolean. All three refuse GitLab's
+        // most central tables — namespaces, users and issues — and between
+        // them they cost hundreds of tables to contagion.
+        for definition in [
+            "CREATE INDEX i ON t USING btree ((ids[1]), created_at)",
+            "CREATE INDEX i ON t USING btree (a, ((b IS NULL)))",
+            "CREATE INDEX i ON t USING btree (lower(split_part((email)::text, '@'::text, 2)), id)",
+            "CREATE INDEX i ON t USING btree (upper(a))",
+            "CREATE INDEX i ON t USING btree (md5(a))",
+            "CREATE INDEX i ON t USING btree (coalesce(a, ''::text))",
+        ] {
+            assert_eq!(interpret(definition), Requirement::Harmless, "{definition}");
+        }
+    }
+
+    #[test]
+    fn a_cast_that_loses_distinctness_is_not_a_column() {
+        // `(created_at)::date` maps many timestamps onto one day, so a unique
+        // index on it is *not* satisfied by making `created_at` distinct.
+        // Reading it as the bare column would have claimed otherwise.
+        assert_eq!(
+            interpret("CREATE UNIQUE INDEX i ON t USING btree (((created_at)::date))"),
+            Requirement::Unknown
+        );
+        // A cast to text keeps distinctness and stays a column.
+        assert_eq!(
+            interpret("CREATE UNIQUE INDEX i ON t USING btree (((name)::text))"),
+            columns(&["name"])
+        );
     }
 
     #[test]
@@ -417,7 +614,10 @@ mod tests {
     fn something_that_is_not_an_index_definition_is_unknown() {
         assert_eq!(interpret("CHECK ((a > 0))"), Requirement::Unknown);
         assert_eq!(interpret(""), Requirement::Unknown);
-        assert_eq!(interpret("CREATE INDEX i ON t USING btree ()"), Requirement::Unknown);
+        assert_eq!(
+            interpret("CREATE INDEX i ON t USING btree ()"),
+            Requirement::Unknown
+        );
     }
 }
 

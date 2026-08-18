@@ -54,7 +54,11 @@ pub enum Meaning {
     /// ignores that has broken the guarantee rather than merely wasted it.
     MustBeNull { column: String },
     /// `col > N` or `col >= N` against a plain integer.
-    LowerBound { column: String, min: i64, inclusive: bool },
+    LowerBound {
+        column: String,
+        min: i64,
+        inclusive: bool,
+    },
     /// `col = lower(col)`, however casted. PowerDNS puts this on four of its
     /// seven tables and it refused the entire schema — for a rule satisfied by
     /// generating a lowercase string, which everything here already does.
@@ -132,7 +136,10 @@ fn column_name(text: &str) -> Option<String> {
         return Some(stripped.replace("\"\"", "\""));
     }
     let ok = !text.is_empty()
-        && text.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && text
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
         && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     ok.then(|| text.to_string())
 }
@@ -234,8 +241,10 @@ pub fn interpret(definition: &str) -> Meaning {
     if let Some(rest) = expression.strip_prefix('(') {
         if let Some((first, tail)) = rest.split_once(')') {
             if tail.trim_start().starts_with("OR ") {
-                if let Some(Some(column)) =
-                    first.strip_suffix("IS NULL").map(str::trim).map(column_name)
+                if let Some(Some(column)) = first
+                    .strip_suffix("IS NULL")
+                    .map(str::trim)
+                    .map(column_name)
                 {
                     return Meaning::MustBeNull { column };
                 }
@@ -273,7 +282,9 @@ pub fn interpret(definition: &str) -> Meaning {
                 .and_then(|s| s.strip_suffix(')'))
             {
                 if let Some(column) = column_name(inner) {
-                    let bound = unwrap_parens(right).split("::").next()
+                    let bound = unwrap_parens(right)
+                        .split("::")
+                        .next()
                         .map(|s| unwrap_parens(s).trim().to_string());
                     if let Some(exact) = bound.and_then(|b| b.parse::<i32>().ok()) {
                         if exact >= 0 {
@@ -287,15 +298,25 @@ pub fn interpret(definition: &str) -> Meaning {
 
     // `col > N` and `col >= N` against a plain integer literal.
     for (operator, inclusive) in [(">=", true), (">", false)] {
-        let Some((left, right)) = expression.split_once(operator) else { continue };
+        let Some((left, right)) = expression.split_once(operator) else {
+            continue;
+        };
         if operator == ">" && right.starts_with('=') {
-            continue;                       // that was `>=`, handled above
+            continue; // that was `>=`, handled above
         }
-        let Some(column) = column_name(left) else { continue };
-        let bound = unwrap_parens(right).split("::").next()
+        let Some(column) = column_name(left) else {
+            continue;
+        };
+        let bound = unwrap_parens(right)
+            .split("::")
+            .next()
             .map(|s| unwrap_parens(s).trim().to_string());
         if let Some(min) = bound.and_then(|b| b.parse::<i64>().ok()) {
-            return Meaning::LowerBound { column, min, inclusive };
+            return Meaning::LowerBound {
+                column,
+                min,
+                inclusive,
+            };
         }
     }
 
@@ -340,8 +361,7 @@ pub fn interpret(definition: &str) -> Meaning {
     if let Some((left, right)) = split_top(expression, "=") {
         if !left.ends_with(['<', '>', '!']) && integer_bound(right) == Some(1) {
             if let Some(arguments) = call_argument(left, "num_nonnulls") {
-                let columns: Vec<Option<String>> =
-                    arguments.split(',').map(column_cast).collect();
+                let columns: Vec<Option<String>> = arguments.split(',').map(column_cast).collect();
                 if columns.len() >= 2 && columns.iter().all(Option::is_some) {
                     return Meaning::ExactlyOneNonNull {
                         columns: columns.into_iter().flatten().collect(),
@@ -385,7 +405,9 @@ pub fn interpret(definition: &str) -> Meaning {
                     .any(|side| unwrap_parens(side.trim()).ends_with("IS NOT NULL"));
             if let [Some(a), Some(b)] = both {
                 if a != b && !plain_form_is_really_the_not_form {
-                    return Meaning::ExactlyOneNonNull { columns: vec![a, b] };
+                    return Meaning::ExactlyOneNonNull {
+                        columns: vec![a, b],
+                    };
                 }
             }
         }
@@ -426,9 +448,7 @@ pub fn interpret(definition: &str) -> Meaning {
                 else {
                     continue;
                 };
-                if ["object", "array", "string", "number", "boolean", "null"]
-                    .contains(&kind)
-                {
+                if ["object", "array", "string", "number", "boolean", "null"].contains(&kind) {
                     return Meaning::JsonType {
                         column,
                         kind: kind.to_string(),
@@ -450,11 +470,17 @@ mod tests {
         // What `pg_get_constraintdef` actually returns, doubled parens and all.
         assert_eq!(
             interpret("CHECK ((char_length(name) <= 255))"),
-            Meaning::LengthLimit { column: "name".into(), max: 255 }
+            Meaning::LengthLimit {
+                column: "name".into(),
+                max: 255
+            }
         );
         assert_eq!(
             interpret("CHECK ((length(title) <= 64))"),
-            Meaning::LengthLimit { column: "title".into(), max: 64 }
+            Meaning::LengthLimit {
+                column: "title".into(),
+                max: 64
+            }
         );
     }
 
@@ -462,7 +488,10 @@ mod tests {
     fn a_bound_written_as_a_cast_is_still_a_bound() {
         assert_eq!(
             interpret("CHECK ((char_length(path) <= (255)::integer))"),
-            Meaning::LengthLimit { column: "path".into(), max: 255 }
+            Meaning::LengthLimit {
+                column: "path".into(),
+                max: 255
+            }
         );
     }
 
@@ -472,7 +501,9 @@ mod tests {
         // migration that adds NOT NULL without a table rewrite.
         assert_eq!(
             interpret("CHECK ((description IS NOT NULL))"),
-            Meaning::NotNull { column: "description".into() }
+            Meaning::NotNull {
+                column: "description".into()
+            }
         );
     }
 
@@ -482,7 +513,10 @@ mod tests {
         // and every row this writes is a new one.
         assert_eq!(
             interpret("CHECK ((char_length(name) <= 255)) NOT VALID"),
-            Meaning::LengthLimit { column: "name".into(), max: 255 }
+            Meaning::LengthLimit {
+                column: "name".into(),
+                max: 255
+            }
         );
     }
 
@@ -490,7 +524,10 @@ mod tests {
     fn a_quoted_column_keeps_its_real_name() {
         assert_eq!(
             interpret("CHECK ((char_length(\"user name\") <= 40))"),
-            Meaning::LengthLimit { column: "user name".into(), max: 40 }
+            Meaning::LengthLimit {
+                column: "user name".into(),
+                max: 40
+            }
         );
     }
 
@@ -529,14 +566,21 @@ mod tests {
     fn not_the_empty_string_is_understood_and_not_the_other_value_is_not() {
         assert_eq!(
             interpret("CHECK ((name <> ''::text))"),
-            Meaning::NonEmpty { column: "name".into() }
+            Meaning::NonEmpty {
+                column: "name".into()
+            }
         );
         assert_eq!(
             interpret("CHECK (((name)::text <> ''::text))"),
-            Meaning::NonEmpty { column: "name".into() }
+            Meaning::NonEmpty {
+                column: "name".into()
+            }
         );
         // A different value is a different rule that happens to look alike.
-        assert_eq!(interpret("CHECK ((status <> 'draft'::text))"), Meaning::Unknown);
+        assert_eq!(
+            interpret("CHECK ((status <> 'draft'::text))"),
+            Meaning::Unknown
+        );
         assert_eq!(interpret("CHECK ((a <> b))"), Meaning::Unknown);
     }
 
@@ -557,7 +601,10 @@ mod tests {
         );
         // The same column on both sides says nothing, and must not be read as
         // an obligation to null one of them.
-        assert_eq!(interpret("CHECK (((a IS NULL) <> (a IS NULL)))"), Meaning::Unknown);
+        assert_eq!(
+            interpret("CHECK (((a IS NULL) <> (a IS NULL)))"),
+            Meaning::Unknown
+        );
     }
 
     #[test]
@@ -607,7 +654,10 @@ mod tests {
         for kind in ["object", "array", "string", "number", "boolean", "null"] {
             assert_eq!(
                 interpret(&format!("CHECK ((jsonb_typeof(filter) = '{kind}'::text))")),
-                Meaning::JsonType { column: "filter".into(), kind: kind.into() },
+                Meaning::JsonType {
+                    column: "filter".into(),
+                    kind: kind.into()
+                },
                 "{kind}"
             );
         }
@@ -617,16 +667,25 @@ mod tests {
     fn a_byte_ceiling_and_an_exact_byte_width_are_different_things() {
         assert_eq!(
             interpret("CHECK ((octet_length(iv) <= 12))"),
-            Meaning::ByteLimit { column: "iv".into(), max: 12 }
+            Meaning::ByteLimit {
+                column: "iv".into(),
+                max: 12
+            }
         );
         assert_eq!(
             interpret("CHECK ((octet_length(sha) = 32))"),
-            Meaning::ByteLength { column: "sha".into(), exact: 32 }
+            Meaning::ByteLength {
+                column: "sha".into(),
+                exact: 32
+            }
         );
         // NOT VALID says nothing about the rows this is about to write.
         assert_eq!(
             interpret("CHECK ((octet_length(target_sha) <= 64)) NOT VALID"),
-            Meaning::ByteLimit { column: "target_sha".into(), max: 64 }
+            Meaning::ByteLimit {
+                column: "target_sha".into(),
+                max: 64
+            }
         );
     }
 
@@ -647,7 +706,10 @@ mod tests {
         // And the ordinary cast still reads as the column it is.
         assert_eq!(
             interpret("CHECK ((char_length((name)::text) <= 20))"),
-            Meaning::LengthLimit { column: "name".into(), max: 20 }
+            Meaning::LengthLimit {
+                column: "name".into(),
+                max: 20
+            }
         );
     }
 
@@ -657,7 +719,10 @@ mod tests {
         // the parentheses alone.
         assert_eq!(
             interpret("CHECK ((char_length((kroki_url)::text) <= 1024))"),
-            Meaning::LengthLimit { column: "kroki_url".into(), max: 1024 }
+            Meaning::LengthLimit {
+                column: "kroki_url".into(),
+                max: 1024
+            }
         );
     }
 
@@ -665,7 +730,10 @@ mod tests {
     fn an_array_length_limit_is_met_by_the_one_element_this_writes() {
         assert_eq!(
             interpret("CHECK ((cardinality(links_to_spam) <= 20))"),
-            Meaning::CardinalityLimit { column: "links_to_spam".into(), max: 20 }
+            Meaning::CardinalityLimit {
+                column: "links_to_spam".into(),
+                max: 20
+            }
         );
     }
 
@@ -679,20 +747,22 @@ mod tests {
         // never evaluated.
         assert_eq!(
             interpret("CHECK (((file IS NULL) OR (char_length(file) <= 255)))"),
-            Meaning::MustBeNull { column: "file".into() }
+            Meaning::MustBeNull {
+                column: "file".into()
+            }
         );
         // The wreckage case itself, with nothing matchable in either branch.
-        assert_eq!(
-            interpret("CHECK (((a = 1) OR (b = 2)))"),
-            Meaning::Unknown
-        );
+        assert_eq!(interpret("CHECK (((a = 1) OR (b = 2)))"), Meaning::Unknown);
     }
 
     #[test]
     fn a_zero_or_negative_bound_is_not_a_length_limit() {
         // `char_length(x) <= 0` means the column must be empty, which is a
         // real rule and not one to treat as an ordinary limit.
-        assert_eq!(interpret("CHECK ((char_length(name) <= 0))"), Meaning::Unknown);
+        assert_eq!(
+            interpret("CHECK ((char_length(name) <= 0))"),
+            Meaning::Unknown
+        );
     }
 
     #[test]
@@ -700,7 +770,10 @@ mod tests {
         // 85 of GitLab's constraints are this: a hash column pinned to width.
         assert_eq!(
             interpret("CHECK ((octet_length(file_sha1) = 20))"),
-            Meaning::ByteLength { column: "file_sha1".into(), exact: 20 }
+            Meaning::ByteLength {
+                column: "file_sha1".into(),
+                exact: 20
+            }
         );
     }
 
@@ -711,7 +784,9 @@ mod tests {
         // baroque and it does not matter.
         assert_eq!(
             interpret("CHECK (((file_md5 IS NULL) OR (octet_length(file_md5) = 16)))"),
-            Meaning::MustBeNull { column: "file_md5".into() }
+            Meaning::MustBeNull {
+                column: "file_md5".into()
+            }
         );
         assert_eq!(
             interpret("CHECK (((x IS NULL) OR (some_baroque_thing(x, y) ~ '^[a-z]+$')))"),
@@ -724,25 +799,39 @@ mod tests {
         // `a = 1 OR (b IS NULL)` does NOT mean b may be nulled: satisfying it
         // that way requires knowing the first branch is false, which is
         // exactly the reasoning this module refuses to do.
-        assert_eq!(interpret("CHECK (((a = 1) OR (b IS NULL)))"), Meaning::Unknown);
+        assert_eq!(
+            interpret("CHECK (((a = 1) OR (b IS NULL)))"),
+            Meaning::Unknown
+        );
     }
 
     #[test]
     fn a_conjunction_containing_is_null_is_not_a_disjunction() {
         // `(a IS NULL) AND (b > 0)` still requires b > 0. Reading the AND as an
         // OR would write NULL and leave the second half violated.
-        assert_eq!(interpret("CHECK (((a IS NULL) AND (b > 0)))"), Meaning::Unknown);
+        assert_eq!(
+            interpret("CHECK (((a IS NULL) AND (b > 0)))"),
+            Meaning::Unknown
+        );
     }
 
     #[test]
     fn a_lower_bound_on_a_plain_integer_is_recognised() {
         assert_eq!(
             interpret("CHECK ((size >= 0))"),
-            Meaning::LowerBound { column: "size".into(), min: 0, inclusive: true }
+            Meaning::LowerBound {
+                column: "size".into(),
+                min: 0,
+                inclusive: true
+            }
         );
         assert_eq!(
             interpret("CHECK ((count > 0))"),
-            Meaning::LowerBound { column: "count".into(), min: 0, inclusive: false }
+            Meaning::LowerBound {
+                column: "count".into(),
+                min: 0,
+                inclusive: false
+            }
         );
     }
 
@@ -751,8 +840,14 @@ mod tests {
         // `a > b` compares two columns, and `a > now()` is not a number at all.
         assert_eq!(interpret("CHECK ((a > b))"), Meaning::Unknown);
         assert_eq!(interpret("CHECK ((created_at > now()))"), Meaning::Unknown);
-        assert_eq!(interpret("CHECK ((total > (0)::numeric))"), Meaning::LowerBound {
-            column: "total".into(), min: 0, inclusive: false });
+        assert_eq!(
+            interpret("CHECK ((total > (0)::numeric))"),
+            Meaning::LowerBound {
+                column: "total".into(),
+                min: 0,
+                inclusive: false
+            }
+        );
     }
 
     #[test]
@@ -760,7 +855,9 @@ mod tests {
         // PowerDNS, on four of its seven tables, in the form Postgres prints.
         assert_eq!(
             interpret("CHECK (((name)::text = lower((name)::text)))"),
-            Meaning::Lowercase { column: "name".into() }
+            Meaning::Lowercase {
+                column: "name".into()
+            }
         );
     }
 
@@ -773,7 +870,10 @@ mod tests {
 
     #[test]
     fn something_that_is_not_a_check_at_all_is_unknown() {
-        assert_eq!(interpret("FOREIGN KEY (a) REFERENCES b(id)"), Meaning::Unknown);
+        assert_eq!(
+            interpret("FOREIGN KEY (a) REFERENCES b(id)"),
+            Meaning::Unknown
+        );
         assert_eq!(interpret(""), Meaning::Unknown);
     }
 }

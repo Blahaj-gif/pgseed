@@ -16,8 +16,11 @@ use clap::Parser;
 use pgsow::{classify, dsn, emit, filter, graph, introspect};
 
 #[derive(Parser)]
-#[command(name = "pgsow", version, about =
-    "Reads a Postgres schema and says what it could fill — or names the table it will not touch, and why")]
+#[command(
+    name = "pgsow",
+    version,
+    about = "Reads a Postgres schema and says what it could fill — or names the table it will not touch, and why"
+)]
 struct Args {
     /// Connection string. Falls back to $DATABASE_URL.
     #[arg(long, env = "DATABASE_URL")]
@@ -119,7 +122,9 @@ fn run() -> Result<std::process::ExitCode, String> {
         .cloned()
         .collect();
     verdict.fillable.retain(|id| !dropped.contains(id));
-    verdict.deferred_repairs.retain(|(id, _)| !dropped.contains(id));
+    verdict
+        .deferred_repairs
+        .retain(|(id, _)| !dropped.contains(id));
 
     for unmatched in rows.unmatched(&verdict.fillable) {
         // A mistyped override that is silently ignored produces a run which
@@ -127,7 +132,10 @@ fn run() -> Result<std::process::ExitCode, String> {
         eprintln!("pgsow: --rows {unmatched} matched no table");
     }
 
-    let options = emit::Options { seed: args.seed, rows: rows.clone() };
+    let options = emit::Options {
+        seed: args.seed,
+        rows: rows.clone(),
+    };
 
     if args.apply {
         // The second guard, and the one that does not depend on the hostname:
@@ -143,7 +151,11 @@ fn run() -> Result<std::process::ExitCode, String> {
                      Pass --truncate to empty them, or --allow-nonempty to add to them.",
                     populated.len(),
                     names.join(", "),
-                    if populated.len() > names.len() { ", and others" } else { "" }
+                    if populated.len() > names.len() {
+                        ", and others"
+                    } else {
+                        ""
+                    }
                 ));
             }
         }
@@ -152,8 +164,12 @@ fn run() -> Result<std::process::ExitCode, String> {
             // Reverse dependency order, so a parent is never emptied while a
             // child still points at it. CASCADE is deliberately not used: it
             // would silently empty tables this was never asked to touch.
-            let names: Vec<String> =
-                verdict.fillable.iter().rev().map(|id| id.quoted()).collect();
+            let names: Vec<String> = verdict
+                .fillable
+                .iter()
+                .rev()
+                .map(|id| id.quoted())
+                .collect();
             client
                 .batch_execute(&format!("TRUNCATE {};", names.join(", ")))
                 .map_err(|e| format!("could not empty the tables first: {e}"))?;
@@ -232,7 +248,11 @@ fn report(
         eprintln!("\n  refused:");
         for (id, reasons) in &verdict.refused {
             for (n, reason) in reasons.iter().enumerate() {
-                let label = if n == 0 { id.to_string() } else { String::new() };
+                let label = if n == 0 {
+                    id.to_string()
+                } else {
+                    String::new()
+                };
                 eprintln!("    {label:<24} {}", reason.explain());
             }
         }

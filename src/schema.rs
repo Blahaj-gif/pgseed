@@ -24,7 +24,10 @@ pub struct TableId {
 
 impl TableId {
     pub fn new(schema: impl Into<String>, name: impl Into<String>) -> Self {
-        Self { schema: schema.into(), name: name.into() }
+        Self {
+            schema: schema.into(),
+            name: name.into(),
+        }
     }
 
     /// Quoted for SQL. Always quoted, never conditionally: an identifier that
@@ -62,38 +65,66 @@ pub fn quote_ident(name: &str) -> String {
 pub enum ColumnType {
     Boolean,
     /// Width in bytes, so `smallint` is not handed a value that overflows it.
-    Integer { bytes: u8 },
+    Integer {
+        bytes: u8,
+    },
     /// `numeric(p, s)`; `None` where the column declares no limit.
-    Numeric { precision: Option<i32>, scale: Option<i32> },
-    Float { bytes: u8 },
+    Numeric {
+        precision: Option<i32>,
+        scale: Option<i32>,
+    },
+    Float {
+        bytes: u8,
+    },
     /// `varchar(n)` and `char(n)` carry their limit; `text` does not.
-    Text { max_length: Option<i32> },
+    Text {
+        max_length: Option<i32>,
+    },
     Uuid,
     Date,
     Time,
-    Timestamp { with_zone: bool },
+    Timestamp {
+        with_zone: bool,
+    },
     Interval,
-    Json { binary: bool },
+    Json {
+        binary: bool,
+    },
     Bytea,
     /// `inet`, `cidr`, `macaddr`. Ordinary Postgres, and their absence refused
     /// a DNS server's entire schema for one column.
-    Network { kind: NetworkKind },
+    Network {
+        kind: NetworkKind,
+    },
     /// A user-defined enum, with its labels in declaration order.
     ///
     /// `qualified` is the schema-qualified, quoted name — what has to be
     /// written to cast an array of these. `None` when two schemas define an
     /// enum of the same name, because then the bare name this was looked up
     /// by does not identify one of them.
-    Enum { name: String, qualified: Option<String>, labels: Vec<String> },
+    Enum {
+        name: String,
+        qualified: Option<String>,
+        labels: Vec<String>,
+    },
     /// A domain wraps another type and may add constraints of its own. The
     /// inner type is kept so the value can be produced; `has_constraint` is
     /// what forces a refusal, since a domain constraint is a CHECK by another
     /// name.
-    Domain { name: String, inner: Box<ColumnType>, has_constraint: bool },
-    Array { of: Box<ColumnType>, dimensions: i32 },
+    Domain {
+        name: String,
+        inner: Box<ColumnType>,
+        has_constraint: bool,
+    },
+    Array {
+        of: Box<ColumnType>,
+        dimensions: i32,
+    },
     /// Anything else. Carries the type name Postgres reported so the refusal
     /// can say `type "geometry"` rather than "an unsupported type".
-    Unsupported { name: String },
+    Unsupported {
+        name: String,
+    },
 }
 
 impl ColumnType {
@@ -101,9 +132,11 @@ impl ColumnType {
     pub fn is_generatable(&self) -> bool {
         match self {
             ColumnType::Unsupported { .. } => false,
-            ColumnType::Domain { has_constraint, inner, .. } => {
-                !has_constraint && inner.is_generatable()
-            }
+            ColumnType::Domain {
+                has_constraint,
+                inner,
+                ..
+            } => !has_constraint && inner.is_generatable(),
             ColumnType::Array { of, .. } => of.is_generatable(),
             _ => true,
         }
@@ -118,35 +151,43 @@ impl ColumnType {
     /// `None` for domains and unrecognised types, and for an enum whose name
     /// is ambiguous across schemas — naming one then would be a guess.
     pub fn sql_name(&self) -> Option<String> {
-        Some(match self {
-            ColumnType::Boolean => "boolean",
-            ColumnType::Integer { bytes: 2 } => "smallint",
-            ColumnType::Integer { bytes: 8 } => "bigint",
-            ColumnType::Integer { .. } => "integer",
-            ColumnType::Numeric { .. } => "numeric",
-            ColumnType::Float { bytes: 4 } => "real",
-            ColumnType::Float { .. } => "double precision",
-            ColumnType::Text { .. } => "text",
-            ColumnType::Uuid => "uuid",
-            ColumnType::Date => "date",
-            ColumnType::Time => "time",
-            ColumnType::Timestamp { with_zone: true } => "timestamptz",
-            ColumnType::Timestamp { .. } => "timestamp",
-            ColumnType::Interval => "interval",
-            ColumnType::Json { binary: true } => "jsonb",
-            ColumnType::Json { .. } => "json",
-            ColumnType::Bytea => "bytea",
-            ColumnType::Network { kind: NetworkKind::Inet } => "inet",
-            ColumnType::Network { kind: NetworkKind::Cidr } => "cidr",
-            ColumnType::Network { kind: NetworkKind::MacAddr } => "macaddr",
-            // An enum can be named when it is unambiguous, which is what
-            // lets `ARRAY['sad']::public."mood"[]` be written at all.
-            ColumnType::Enum { qualified, .. } => return qualified.clone(),
-            ColumnType::Domain { .. }
-            | ColumnType::Array { .. }
-            | ColumnType::Unsupported { .. } => return None,
-        }
-        .to_string())
+        Some(
+            match self {
+                ColumnType::Boolean => "boolean",
+                ColumnType::Integer { bytes: 2 } => "smallint",
+                ColumnType::Integer { bytes: 8 } => "bigint",
+                ColumnType::Integer { .. } => "integer",
+                ColumnType::Numeric { .. } => "numeric",
+                ColumnType::Float { bytes: 4 } => "real",
+                ColumnType::Float { .. } => "double precision",
+                ColumnType::Text { .. } => "text",
+                ColumnType::Uuid => "uuid",
+                ColumnType::Date => "date",
+                ColumnType::Time => "time",
+                ColumnType::Timestamp { with_zone: true } => "timestamptz",
+                ColumnType::Timestamp { .. } => "timestamp",
+                ColumnType::Interval => "interval",
+                ColumnType::Json { binary: true } => "jsonb",
+                ColumnType::Json { .. } => "json",
+                ColumnType::Bytea => "bytea",
+                ColumnType::Network {
+                    kind: NetworkKind::Inet,
+                } => "inet",
+                ColumnType::Network {
+                    kind: NetworkKind::Cidr,
+                } => "cidr",
+                ColumnType::Network {
+                    kind: NetworkKind::MacAddr,
+                } => "macaddr",
+                // An enum can be named when it is unambiguous, which is what
+                // lets `ARRAY['sad']::public."mood"[]` be written at all.
+                ColumnType::Enum { qualified, .. } => return qualified.clone(),
+                ColumnType::Domain { .. }
+                | ColumnType::Array { .. }
+                | ColumnType::Unsupported { .. } => return None,
+            }
+            .to_string(),
+        )
     }
 
     /// The name to use when explaining a refusal.
@@ -260,6 +301,23 @@ impl Table {
         })
     }
 
+    /// Whether a CHECK on this table is satisfied by leaving the column NULL,
+    /// and so obliges the generator to.
+    ///
+    /// The counterpart of `check_forbids_null`, and the reason both exist: a
+    /// table can carry one of each over the same column, and then no row
+    /// satisfies both. GitLab's `ai_tool_rules` says three columns may each be
+    /// null-or-one-of-a-list, and separately that at least one of the three
+    /// must not be null.
+    pub fn check_forces_null(&self, column: &str) -> bool {
+        self.checks.iter().any(|check| {
+            matches!(
+                crate::checks::interpret(&check.definition),
+                crate::checks::Meaning::MustBeNull { column: c } if c == column
+            )
+        })
+    }
+
     /// The columns a row must actually supply: not generated, and either
     /// required or worth filling. A column with a default is left to the
     /// database, which is both simpler and more likely to be what the schema
@@ -328,7 +386,10 @@ mod tests {
     fn a_table_in_public_prints_without_the_schema() {
         // What a person calls it, in every message they will read.
         assert_eq!(TableId::new("public", "orders").to_string(), "orders");
-        assert_eq!(TableId::new("billing", "orders").to_string(), "billing.orders");
+        assert_eq!(
+            TableId::new("billing", "orders").to_string(),
+            "billing.orders"
+        );
     }
 
     #[test]
@@ -341,7 +402,9 @@ mod tests {
 
     #[test]
     fn an_unknown_type_is_not_generatable_and_keeps_its_name() {
-        let t = ColumnType::Unsupported { name: "geometry".into() };
+        let t = ColumnType::Unsupported {
+            name: "geometry".into(),
+        };
         assert!(!t.is_generatable());
         assert_eq!(t.describe(), "geometry");
     }
@@ -368,7 +431,9 @@ mod tests {
     #[test]
     fn an_array_of_something_unknown_is_unknown() {
         let t = ColumnType::Array {
-            of: Box::new(ColumnType::Unsupported { name: "geometry".into() }),
+            of: Box::new(ColumnType::Unsupported {
+                name: "geometry".into(),
+            }),
             dimensions: 1,
         };
         assert!(!t.is_generatable());
@@ -407,7 +472,11 @@ mod tests {
             column("created_at", false, true, false),
             column("amount", false, false, false),
         ]);
-        let names: Vec<&str> = t.columns_to_write().iter().map(|c| c.name.as_str()).collect();
+        let names: Vec<&str> = t
+            .columns_to_write()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
         assert_eq!(names, vec!["amount"]);
     }
 

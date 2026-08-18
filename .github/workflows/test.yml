@@ -1,0 +1,65 @@
+name: test
+
+# The corpus is fetched rather than committed — other projects' schemas are
+# not ours to redistribute — so the schema tests skip cleanly when it is
+# absent. A pull request gets the fast, hermetic half; the corpus runs on a
+# schedule and on main, where a token lifts the API rate limit.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: unit tests, lints, formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets
+      # No database needed: these are the parsers and the graph, which are
+      # where most of the logic lives and all of it is pure.
+      - run: cargo test --lib
+
+  database:
+    name: against a real Postgres
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `postgresql_embedded` downloads and starts its own server, so there is
+      # no service container here and no version drift between CI and a laptop.
+      - run: cargo test --test oracle --test introspection --test cli -- --test-threads=1
+
+  corpus:
+    name: eighteen real schemas
+    # Not on pull requests: it fetches several megabytes from other people's
+    # repositories, and a fork's token cannot do that.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: fetch the corpus
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tests/corpus/fetch.py
+      # The gate: every statement generated for every schema, judged by the
+      # database. Zero rejections, not a percentage.
+      - run: cargo test --test corpus -- --test-threads=1 --nocapture

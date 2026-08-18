@@ -16,8 +16,7 @@ use std::collections::BTreeMap;
 use postgres::Client;
 
 use crate::schema::{
-    quote_ident, CheckConstraint, Column, ColumnType, ForeignKey, Schema, Table, TableId,
-    UniqueKey,
+    quote_ident, CheckConstraint, Column, ColumnType, ForeignKey, Schema, Table, TableId, UniqueKey,
 };
 
 /// Ordinary tables in the named schemas. Views, matviews, partitions and
@@ -203,7 +202,15 @@ impl<'a> TypeRow<'a> {
 /// unrecognised name becomes `Unsupported` carrying that name rather than a
 /// guess: a column this cannot generate must refuse its table by name.
 pub fn map_type(row: TypeRow<'_>, enums: &BTreeMap<String, EnumType>) -> ColumnType {
-    let TypeRow { typname, typtype, typmod, ndims, base, domain_checked, element } = row;
+    let TypeRow {
+        typname,
+        typtype,
+        typmod,
+        ndims,
+        base,
+        domain_checked,
+        element,
+    } = row;
     // Enum, before anything else: its name is user-chosen and could collide
     // with a built-in.
     if typtype == "e" {
@@ -222,7 +229,9 @@ pub fn map_type(row: TypeRow<'_>, enums: &BTreeMap<String, EnumType>) -> ColumnT
             Some((base_name, base_type)) => {
                 map_type(TypeRow::plain(base_name, base_type, typmod), enums)
             }
-            None => ColumnType::Unsupported { name: typname.to_string() },
+            None => ColumnType::Unsupported {
+                name: typname.to_string(),
+            },
         };
         return ColumnType::Domain {
             name: typname.to_string(),
@@ -234,9 +243,7 @@ pub fn map_type(row: TypeRow<'_>, enums: &BTreeMap<String, EnumType>) -> ColumnT
     // Arrays: Postgres names them with a leading underscore.
     if let Some(stripped) = typname.strip_prefix('_') {
         let of = match element {
-            Some((el_name, el_type)) => {
-                map_type(TypeRow::plain(el_name, el_type, typmod), enums)
-            }
+            Some((el_name, el_type)) => map_type(TypeRow::plain(el_name, el_type, typmod), enums),
             None => map_type(TypeRow::plain(stripped, "b", typmod), enums),
         };
         return ColumnType::Array {
@@ -276,12 +283,18 @@ pub fn map_type(row: TypeRow<'_>, enums: &BTreeMap<String, EnumType>) -> ColumnT
         "json" => ColumnType::Json { binary: false },
         "jsonb" => ColumnType::Json { binary: true },
         "bytea" => ColumnType::Bytea,
-        "inet" => ColumnType::Network { kind: crate::schema::NetworkKind::Inet },
-        "cidr" => ColumnType::Network { kind: crate::schema::NetworkKind::Cidr },
-        "macaddr" | "macaddr8" => {
-            ColumnType::Network { kind: crate::schema::NetworkKind::MacAddr }
-        }
-        other => ColumnType::Unsupported { name: other.to_string() },
+        "inet" => ColumnType::Network {
+            kind: crate::schema::NetworkKind::Inet,
+        },
+        "cidr" => ColumnType::Network {
+            kind: crate::schema::NetworkKind::Cidr,
+        },
+        "macaddr" | "macaddr8" => ColumnType::Network {
+            kind: crate::schema::NetworkKind::MacAddr,
+        },
+        other => ColumnType::Unsupported {
+            name: other.to_string(),
+        },
     }
 }
 
@@ -294,13 +307,21 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
         let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
         schema.tables.insert(
             id.clone(),
-            Table { id, columns: vec![], foreign_keys: vec![], unique_keys: vec![], checks: vec![] },
+            Table {
+                id,
+                columns: vec![],
+                foreign_keys: vec![],
+                unique_keys: vec![],
+                checks: vec![],
+            },
         );
     }
 
     for row in client.query(COLUMNS_SQL, &[&schemas])? {
         let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
-        let Some(table) = schema.tables.get_mut(&id) else { continue };
+        let Some(table) = schema.tables.get_mut(&id) else {
+            continue;
+        };
 
         let typname: String = row.get("typname");
         let typtype: i8 = row.get("typtype");
@@ -344,7 +365,9 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
     // unique constraint and are not stored as one.
     for row in client.query(UNIQUE_INDEXES_SQL, &[&schemas])? {
         let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
-        let Some(table) = schema.tables.get_mut(&id) else { continue };
+        let Some(table) = schema.tables.get_mut(&id) else {
+            continue;
+        };
         let name: String = row.get("index_name");
         let definition: String = row.get("definition");
         let unique: bool = row.get("is_unique");
@@ -358,7 +381,11 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
             // Plain columns. Unique makes them a key; not unique asks nothing.
             crate::indexes::Requirement::Columns(columns) => {
                 if unique {
-                    table.unique_keys.push(UniqueKey { name, columns, is_primary: false });
+                    table.unique_keys.push(UniqueKey {
+                        name,
+                        columns,
+                        is_primary: false,
+                    });
                 }
             }
             // Every expression is `lower(col)`, which cannot fail — so a
@@ -376,7 +403,21 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
                     });
                 }
                 if unique {
-                    table.unique_keys.push(UniqueKey { name, columns, is_primary: false });
+                    table.unique_keys.push(UniqueKey {
+                        name,
+                        columns,
+                        is_primary: false,
+                    });
+                }
+            }
+            // Every key is an expression that cannot fail. A non-unique index
+            // enforces nothing, so it constrains nothing and is ignored; a
+            // unique one is asking whether those expressions can be made
+            // distinct, which is a different question and not one this can
+            // answer.
+            crate::indexes::Requirement::Harmless => {
+                if unique {
+                    table.checks.push(CheckConstraint { name, definition });
                 }
             }
             // Anything else refuses the table, quoting the index back. An
@@ -390,7 +431,9 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
 
     for row in client.query(CONSTRAINTS_SQL, &[&schemas])? {
         let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
-        let Some(table) = schema.tables.get_mut(&id) else { continue };
+        let Some(table) = schema.tables.get_mut(&id) else {
+            continue;
+        };
 
         let name: String = row.get("conname");
         let kind = row.get::<_, i8>("contype") as u8 as char;
@@ -462,9 +505,8 @@ fn read_enums(client: &mut Client) -> Result<BTreeMap<String, EnumType>, postgre
         out.insert(
             typname.clone(),
             EnumType {
-                qualified: (!ambiguous).then(|| {
-                    format!("{}.{}", quote_ident(&namespace), quote_ident(&typname))
-                }),
+                qualified: (!ambiguous)
+                    .then(|| format!("{}.{}", quote_ident(&namespace), quote_ident(&typname))),
                 labels,
             },
         );
@@ -491,14 +533,22 @@ mod tests {
         assert_eq!(map("bool", -1), ColumnType::Boolean);
         assert_eq!(map("uuid", -1), ColumnType::Uuid);
         assert_eq!(map("jsonb", -1), ColumnType::Json { binary: true });
-        assert_eq!(map("timestamptz", -1), ColumnType::Timestamp { with_zone: true });
+        assert_eq!(
+            map("timestamptz", -1),
+            ColumnType::Timestamp { with_zone: true }
+        );
     }
 
     #[test]
     fn a_declared_length_is_carried_so_a_value_can_fit_it() {
         // varchar(20) arrives as atttypmod 24: the length plus a four-byte
         // header. Writing 30 characters into it is a runtime error.
-        assert_eq!(map("varchar", 24), ColumnType::Text { max_length: Some(20) });
+        assert_eq!(
+            map("varchar", 24),
+            ColumnType::Text {
+                max_length: Some(20)
+            }
+        );
         assert_eq!(map("varchar", -1), ColumnType::Text { max_length: None });
         assert_eq!(map("text", -1), ColumnType::Text { max_length: None });
     }
@@ -511,29 +561,47 @@ mod tests {
         let packed = ((10 << 16) | 2) + 4;
         assert_eq!(
             map("numeric", packed),
-            ColumnType::Numeric { precision: Some(10), scale: Some(2) }
+            ColumnType::Numeric {
+                precision: Some(10),
+                scale: Some(2)
+            }
         );
-        assert_eq!(map("numeric", -1), ColumnType::Numeric { precision: None, scale: None });
+        assert_eq!(
+            map("numeric", -1),
+            ColumnType::Numeric {
+                precision: None,
+                scale: None
+            }
+        );
     }
 
     #[test]
     fn an_unknown_type_keeps_its_name_for_the_refusal_message() {
         assert_eq!(
             map("geometry", -1),
-            ColumnType::Unsupported { name: "geometry".into() }
+            ColumnType::Unsupported {
+                name: "geometry".into()
+            }
         );
     }
 
     #[test]
     fn an_enum_carries_its_labels_in_declaration_order() {
         let mut enums = BTreeMap::new();
-        enums.insert("status".to_string(), EnumType {
-            qualified: Some("\"public\".\"status\"".into()),
-            labels: vec!["pending".to_string(), "shipped".to_string()],
-        });
+        enums.insert(
+            "status".to_string(),
+            EnumType {
+                qualified: Some("\"public\".\"status\"".into()),
+                labels: vec!["pending".to_string(), "shipped".to_string()],
+            },
+        );
         let t = map_type(TypeRow::plain("status", "e", -1), &enums);
         match t {
-            ColumnType::Enum { name, labels, qualified } => {
+            ColumnType::Enum {
+                name,
+                labels,
+                qualified,
+            } => {
                 assert_eq!(name, "status");
                 assert_eq!(labels, vec!["pending", "shipped"]);
                 // The qualified name is what an array of these is cast to.
@@ -545,10 +613,20 @@ mod tests {
 
     #[test]
     fn a_domain_without_a_check_is_generated_as_its_base_type() {
-        let t = map_type(TypeRow { base: Some(("text", "b")), ..TypeRow::plain("email", "d", -1) }, &no_enums());
+        let t = map_type(
+            TypeRow {
+                base: Some(("text", "b")),
+                ..TypeRow::plain("email", "d", -1)
+            },
+            &no_enums(),
+        );
         assert!(t.is_generatable());
         match &t {
-            ColumnType::Domain { inner, has_constraint, .. } => {
+            ColumnType::Domain {
+                inner,
+                has_constraint,
+                ..
+            } => {
                 assert_eq!(**inner, ColumnType::Text { max_length: None });
                 assert!(!has_constraint);
             }
@@ -560,13 +638,27 @@ mod tests {
     fn a_domain_with_a_check_is_not_generatable() {
         // `CREATE DOMAIN positive AS int CHECK (VALUE > 0)` needs the same
         // expression solving a table CHECK does, so it gets the same answer.
-        let t = map_type(TypeRow { base: Some(("int4", "b")), domain_checked: true, ..TypeRow::plain("positive", "d", -1) }, &no_enums());
+        let t = map_type(
+            TypeRow {
+                base: Some(("int4", "b")),
+                domain_checked: true,
+                ..TypeRow::plain("positive", "d", -1)
+            },
+            &no_enums(),
+        );
         assert!(!t.is_generatable());
     }
 
     #[test]
     fn an_array_is_recognised_by_its_leading_underscore() {
-        let t = map_type(TypeRow { ndims: 1, element: Some(("int4", "b")), ..TypeRow::plain("_int4", "b", -1) }, &no_enums());
+        let t = map_type(
+            TypeRow {
+                ndims: 1,
+                element: Some(("int4", "b")),
+                ..TypeRow::plain("_int4", "b", -1)
+            },
+            &no_enums(),
+        );
         match t {
             ColumnType::Array { of, dimensions } => {
                 assert_eq!(*of, ColumnType::Integer { bytes: 4 });
@@ -578,7 +670,14 @@ mod tests {
 
     #[test]
     fn an_array_of_an_unknown_type_is_still_unknown() {
-        let t = map_type(TypeRow { ndims: 1, element: Some(("geometry", "b")), ..TypeRow::plain("_geometry", "b", -1) }, &no_enums());
+        let t = map_type(
+            TypeRow {
+                ndims: 1,
+                element: Some(("geometry", "b")),
+                ..TypeRow::plain("_geometry", "b", -1)
+            },
+            &no_enums(),
+        );
         assert!(!t.is_generatable());
         assert_eq!(t.describe(), "geometry[]");
     }

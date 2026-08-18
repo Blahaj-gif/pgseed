@@ -125,9 +125,7 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
             // A NOT NULL column carrying `(col IS NULL) OR ...` genuinely
             // cannot take this way out, and accepting it would produce rows
             // that violate the constraint the moment they are written.
-            Meaning::MustBeNull { column } => {
-                table.column(&column).is_some_and(|c| c.nullable)
-            }
+            Meaning::MustBeNull { column } => table.column(&column).is_some_and(|c| c.nullable),
             // A byte ceiling is a length limit the generator honours; an array
             // limit of one or more is already met, because every array this
             // writes holds one element.
@@ -139,7 +137,13 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
             // unless a foreign key had nowhere to point. One that certainly
             // gets a value is enough, and `filled_column` finds it.
             Meaning::AtLeastOneNonNull { columns } => {
-                crate::generate::filled_column(table, &columns).is_some()
+                // At least one of them has to end up holding a value, so at
+                // least one must not be under an obligation to be null. Every
+                // one of GitLab's `ai_tool_rules` permission columns is, from
+                // a separate `(col IS NULL) OR ...` on each — and the two
+                // rules together have no satisfying row.
+                columns.iter().any(|c| !table.check_forces_null(c))
+                    && crate::generate::filled_column(table, &columns).is_some()
             }
             Meaning::CardinalityLimit { column, max } => {
                 max >= 1 && table.column(&column).is_some()
@@ -156,11 +160,15 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
             Meaning::ExactlyOneNonNull { columns } => {
                 let chosen = crate::generate::filled_column(table, &columns);
                 chosen.is_some_and(|keep| {
-                    columns.iter().all(|c| {
-                        table
-                            .column(c)
-                            .is_some_and(|col| *c == keep || col.nullable)
-                    })
+                    // The one that holds the value must not be under an
+                    // obligation elsewhere to be null, and every other one
+                    // must be allowed to be.
+                    !table.check_forces_null(&keep)
+                        && columns.iter().all(|c| {
+                            table
+                                .column(c)
+                                .is_some_and(|col| *c == keep || col.nullable)
+                        })
                 })
             }
             Meaning::Unknown => false,
@@ -195,7 +203,9 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
     }
 
     if let Some(reason) = order.reason_for(&table.id) {
-        out.push(Refusal::UnbreakableCycle { reason: reason.to_string() });
+        out.push(Refusal::UnbreakableCycle {
+            reason: reason.to_string(),
+        });
     }
 
     out
@@ -232,9 +242,7 @@ fn every_choice_is_blocked(
                 blocking = None;
                 break;
             };
-            if !refused.contains(&fk.references)
-                && schema.tables.contains_key(&fk.references)
-            {
+            if !refused.contains(&fk.references) && schema.tables.contains_key(&fk.references) {
                 // This parent is fillable, so this column will hold something.
                 blocking = None;
                 break;
@@ -405,7 +413,12 @@ pub fn classify(schema: &Schema, order: &Order) -> Verdict {
         }
     }
 
-    Verdict { fillable, refused: refusals, deferred_constraints, deferred_repairs }
+    Verdict {
+        fillable,
+        refused: refusals,
+        deferred_constraints,
+        deferred_repairs,
+    }
 }
 
 #[cfg(test)]
@@ -454,7 +467,10 @@ mod tests {
 
     #[test]
     fn a_plain_table_is_fillable() {
-        let s = schema_of(vec![table("users", vec![col("name", ColumnType::Text { max_length: None }, false)])]);
+        let s = schema_of(vec![table(
+            "users",
+            vec![col("name", ColumnType::Text { max_length: None }, false)],
+        )]);
         let v = verdict_for(&s);
         assert_eq!(v.fillable.len(), 1);
         assert!(v.refused.is_empty());
@@ -464,7 +480,17 @@ mod tests {
     #[test]
     fn a_check_constraint_refuses_the_table_and_quotes_the_rule() {
         // The whole doctrine: read it, quote it, do not attempt it.
-        let mut t = table("invoices", vec![col("total", ColumnType::Numeric { precision: None, scale: None }, false)]);
+        let mut t = table(
+            "invoices",
+            vec![col(
+                "total",
+                ColumnType::Numeric {
+                    precision: None,
+                    scale: None,
+                },
+                false,
+            )],
+        );
         t.checks.push(CheckConstraint {
             name: "invoices_total_positive".into(),
             definition: "CHECK ((num_nonnulls(a, b) = 1))".into(),
@@ -481,22 +507,47 @@ mod tests {
     #[test]
     fn an_unsupported_type_refuses_only_when_a_row_must_supply_it() {
         // A nullable exotic column costs nothing: leave it out.
-        let nullable = table("places", vec![
-            col("name", ColumnType::Text { max_length: None }, false),
-            col("shape", ColumnType::Unsupported { name: "geometry".into() }, true),
-        ]);
+        let nullable = table(
+            "places",
+            vec![
+                col("name", ColumnType::Text { max_length: None }, false),
+                col(
+                    "shape",
+                    ColumnType::Unsupported {
+                        name: "geometry".into(),
+                    },
+                    true,
+                ),
+            ],
+        );
         assert!(verdict_for(&schema_of(vec![nullable])).refused.is_empty());
 
-        let required = table("places", vec![
-            col("shape", ColumnType::Unsupported { name: "geometry".into() }, false),
-        ]);
+        let required = table(
+            "places",
+            vec![col(
+                "shape",
+                ColumnType::Unsupported {
+                    name: "geometry".into(),
+                },
+                false,
+            )],
+        );
         let v = verdict_for(&schema_of(vec![required]));
         assert!(v.refused[0].1[0].explain().contains("geometry"));
     }
 
     #[test]
     fn a_defaulted_column_of_an_unknown_type_is_left_to_the_database() {
-        let mut t = table("events", vec![col("payload", ColumnType::Unsupported { name: "tsvector".into() }, false)]);
+        let mut t = table(
+            "events",
+            vec![col(
+                "payload",
+                ColumnType::Unsupported {
+                    name: "tsvector".into(),
+                },
+                false,
+            )],
+        );
         t.columns[0].has_default = true;
         assert!(verdict_for(&schema_of(vec![t])).refused.is_empty());
     }
@@ -565,7 +616,10 @@ mod tests {
     fn fillable_tables_stay_in_insert_order() {
         // Filtering out a refusal must not disturb the topological order of
         // what remains, or children get written before their parents.
-        let users = table("users", vec![col("name", ColumnType::Text { max_length: None }, false)]);
+        let users = table(
+            "users",
+            vec![col("name", ColumnType::Text { max_length: None }, false)],
+        );
         let mut orders = table("orders", vec![col("user_id", int(), false)]);
         orders.foreign_keys.push(ForeignKey {
             name: "o_u".into(),
@@ -632,7 +686,10 @@ mod tests {
             definition: "CHECK ((user_id IS NOT NULL))".into(),
         });
         let v = verdict_for(&schema_of(vec![orders]));
-        assert!(v.fillable.is_empty(), "a CHECK said this column is not null");
+        assert!(
+            v.fillable.is_empty(),
+            "a CHECK said this column is not null"
+        );
         assert!(v.refused[0].1[0].explain().contains("not read"));
     }
 
