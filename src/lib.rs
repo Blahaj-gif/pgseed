@@ -8,13 +8,6 @@
 //! **The rule the whole thing is built on:** never emit a row that cannot be
 //! shown to satisfy every constraint that was read. See `classify`.
 
-// Introspection records everything the catalog can see; this milestone only
-// classifies. Primary keys, referenced columns and column positions are read
-// and not yet consumed — they are what the generation milestone needs, and
-// dropping them now would mean querying for them again later. This allow comes
-// off with the first generator.
-#![allow(dead_code)]
-
 pub mod checks;
 pub mod classify;
 pub mod dsn;

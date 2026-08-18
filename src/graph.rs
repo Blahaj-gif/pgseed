@@ -120,7 +120,7 @@ pub fn order(schema: &Schema) -> Order {
             if fk.references == *id {
                 cycles.push(Cycle {
                     tables: vec![id.clone()],
-                    strategy: strategy_for(schema, &[id.clone()]),
+                    strategy: strategy_for(schema, std::slice::from_ref(id)),
                 });
                 break;
             }

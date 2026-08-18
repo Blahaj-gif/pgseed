@@ -282,7 +282,7 @@ impl Table {
             && self
                 .unique_keys
                 .iter()
-                .any(|k| k.columns.iter().any(|c| *c == column.name))
+                .any(|k| k.columns.contains(&column.name))
     }
 
     pub fn primary_key(&self) -> Option<&UniqueKey> {

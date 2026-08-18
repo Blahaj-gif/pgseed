@@ -224,10 +224,8 @@ pub fn interpret(definition: &str) -> Meaning {
     let rest = rest.trim().trim_end_matches("NOT VALID").trim();
     let expression = unwrap_parens(rest);
 
-    if let Some(column) = expression.strip_suffix("IS NOT NULL").map(column_name) {
-        if let Some(column) = column {
-            return Meaning::NotNull { column };
-        }
+    if let Some(Some(column)) = expression.strip_suffix("IS NOT NULL").map(column_name) {
+        return Meaning::NotNull { column };
     }
 
     // `(col IS NULL) OR ...` — satisfied by writing NULL, whatever follows.
@@ -236,10 +234,10 @@ pub fn interpret(definition: &str) -> Meaning {
     if let Some(rest) = expression.strip_prefix('(') {
         if let Some((first, tail)) = rest.split_once(')') {
             if tail.trim_start().starts_with("OR ") {
-                if let Some(column) = first.strip_suffix("IS NULL").map(str::trim).map(column_name) {
-                    if let Some(column) = column {
-                        return Meaning::MustBeNull { column };
-                    }
+                if let Some(Some(column)) =
+                    first.strip_suffix("IS NULL").map(str::trim).map(column_name)
+                {
+                    return Meaning::MustBeNull { column };
                 }
             }
         }

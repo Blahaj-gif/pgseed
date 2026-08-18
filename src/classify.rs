@@ -232,8 +232,8 @@ fn every_choice_is_blocked(
                 blocking = None;
                 break;
             };
-            if !(refused.contains(&fk.references)
-                || !schema.tables.contains_key(&fk.references))
+            if !refused.contains(&fk.references)
+                && schema.tables.contains_key(&fk.references)
             {
                 // This parent is fillable, so this column will hold something.
                 blocking = None;

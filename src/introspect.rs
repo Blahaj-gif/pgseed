@@ -159,22 +159,51 @@ const ENUMS_SQL: &str = "
     JOIN pg_namespace n ON n.oid = t.typnamespace
     ORDER BY t.typname, n.nspname, e.enumsortorder";
 
+/// The `pg_type` columns that decide what a column's type is.
+///
+/// A struct rather than eight positional arguments, three of which are `&str`
+/// and two of which are `Option<(&str, &str)>` — a pair that is easy to hand
+/// over in the wrong order and impossible to notice having done so.
+#[derive(Debug, Clone, Copy)]
+pub struct TypeRow<'a> {
+    pub typname: &'a str,
+    pub typtype: &'a str,
+    /// `atttypmod`: the declared length or precision, offset by four.
+    pub typmod: i32,
+    /// `attndims`: how many array dimensions were declared.
+    pub ndims: i32,
+    /// For a domain, the type it wraps, as (name, kind).
+    pub base: Option<(&'a str, &'a str)>,
+    /// Whether a domain adds a constraint of its own.
+    pub domain_checked: bool,
+    /// For an array, the type of its elements, as (name, kind).
+    pub element: Option<(&'a str, &'a str)>,
+}
+
+impl<'a> TypeRow<'a> {
+    /// A plain named type: no length, no dimensions, nothing wrapped. What the
+    /// recursive calls need when they descend into a domain or an array.
+    pub fn plain(typname: &'a str, typtype: &'a str, typmod: i32) -> TypeRow<'a> {
+        TypeRow {
+            typname,
+            typtype,
+            typmod,
+            ndims: 0,
+            base: None,
+            domain_checked: false,
+            element: None,
+        }
+    }
+}
+
 /// Map what Postgres calls a type to what this tool can do about it.
 ///
 /// A pure function, and unit tested, because it is the part most likely to be
 /// quietly wrong and the part that does not need a database to check. An
 /// unrecognised name becomes `Unsupported` carrying that name rather than a
 /// guess: a column this cannot generate must refuse its table by name.
-pub fn map_type(
-    typname: &str,
-    typtype: &str,
-    typmod: i32,
-    ndims: i32,
-    base: Option<(&str, &str)>,
-    domain_checked: bool,
-    element: Option<(&str, &str)>,
-    enums: &BTreeMap<String, EnumType>,
-) -> ColumnType {
+pub fn map_type(row: TypeRow<'_>, enums: &BTreeMap<String, EnumType>) -> ColumnType {
+    let TypeRow { typname, typtype, typmod, ndims, base, domain_checked, element } = row;
     // Enum, before anything else: its name is user-chosen and could collide
     // with a built-in.
     if typtype == "e" {
@@ -190,9 +219,9 @@ pub fn map_type(
     // constraint, which is a CHECK by another name and refused like one.
     if typtype == "d" {
         let inner = match base {
-            Some((base_name, base_type)) => map_type(
-                base_name, base_type, typmod, 0, None, false, None, enums,
-            ),
+            Some((base_name, base_type)) => {
+                map_type(TypeRow::plain(base_name, base_type, typmod), enums)
+            }
             None => ColumnType::Unsupported { name: typname.to_string() },
         };
         return ColumnType::Domain {
@@ -206,9 +235,9 @@ pub fn map_type(
     if let Some(stripped) = typname.strip_prefix('_') {
         let of = match element {
             Some((el_name, el_type)) => {
-                map_type(el_name, el_type, typmod, 0, None, false, None, enums)
+                map_type(TypeRow::plain(el_name, el_type, typmod), enums)
             }
-            None => map_type(stripped, "b", typmod, 0, None, false, None, enums),
+            None => map_type(TypeRow::plain(stripped, "b", typmod), enums),
         };
         return ColumnType::Array {
             of: Box::new(of),
@@ -284,17 +313,19 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
         let element_typtype = element_typtype.map(|c| (c as u8 as char).to_string());
 
         let type_ = map_type(
-            &typname,
-            &(typtype as u8 as char).to_string(),
-            row.get::<_, i32>("atttypmod"),
-            // `attndims` is int2 in the catalog, not int4. Reading it as the
-            // wrong width is a deserialisation error rather than a silent
-            // misread, which is the good kind of wrong — and exactly the kind
-            // only a real database finds.
-            row.get::<_, i16>("attndims") as i32,
-            base_typname.as_deref().zip(base_typtype.as_deref()),
-            row.get::<_, bool>("domain_checked"),
-            element_typname.as_deref().zip(element_typtype.as_deref()),
+            TypeRow {
+                typname: &typname,
+                typtype: &(typtype as u8 as char).to_string(),
+                typmod: row.get::<_, i32>("atttypmod"),
+                // `attndims` is int2 in the catalog, not int4. Reading it as
+                // the wrong width is a deserialisation error rather than a
+                // silent misread, which is the good kind of wrong — and
+                // exactly the kind only a real database finds.
+                ndims: row.get::<_, i16>("attndims") as i32,
+                base: base_typname.as_deref().zip(base_typtype.as_deref()),
+                domain_checked: row.get::<_, bool>("domain_checked"),
+                element: element_typname.as_deref().zip(element_typtype.as_deref()),
+            },
             &enums,
         );
 
@@ -450,7 +481,7 @@ mod tests {
     }
 
     fn map(typname: &str, typmod: i32) -> ColumnType {
-        map_type(typname, "b", typmod, 0, None, false, None, &no_enums())
+        map_type(TypeRow::plain(typname, "b", typmod), &no_enums())
     }
 
     #[test]
@@ -500,7 +531,7 @@ mod tests {
             qualified: Some("\"public\".\"status\"".into()),
             labels: vec!["pending".to_string(), "shipped".to_string()],
         });
-        let t = map_type("status", "e", -1, 0, None, false, None, &enums);
+        let t = map_type(TypeRow::plain("status", "e", -1), &enums);
         match t {
             ColumnType::Enum { name, labels, qualified } => {
                 assert_eq!(name, "status");
@@ -514,7 +545,7 @@ mod tests {
 
     #[test]
     fn a_domain_without_a_check_is_generated_as_its_base_type() {
-        let t = map_type("email", "d", -1, 0, Some(("text", "b")), false, None, &no_enums());
+        let t = map_type(TypeRow { base: Some(("text", "b")), ..TypeRow::plain("email", "d", -1) }, &no_enums());
         assert!(t.is_generatable());
         match &t {
             ColumnType::Domain { inner, has_constraint, .. } => {
@@ -529,13 +560,13 @@ mod tests {
     fn a_domain_with_a_check_is_not_generatable() {
         // `CREATE DOMAIN positive AS int CHECK (VALUE > 0)` needs the same
         // expression solving a table CHECK does, so it gets the same answer.
-        let t = map_type("positive", "d", -1, 0, Some(("int4", "b")), true, None, &no_enums());
+        let t = map_type(TypeRow { base: Some(("int4", "b")), domain_checked: true, ..TypeRow::plain("positive", "d", -1) }, &no_enums());
         assert!(!t.is_generatable());
     }
 
     #[test]
     fn an_array_is_recognised_by_its_leading_underscore() {
-        let t = map_type("_int4", "b", -1, 1, None, false, Some(("int4", "b")), &no_enums());
+        let t = map_type(TypeRow { ndims: 1, element: Some(("int4", "b")), ..TypeRow::plain("_int4", "b", -1) }, &no_enums());
         match t {
             ColumnType::Array { of, dimensions } => {
                 assert_eq!(*of, ColumnType::Integer { bytes: 4 });
@@ -547,7 +578,7 @@ mod tests {
 
     #[test]
     fn an_array_of_an_unknown_type_is_still_unknown() {
-        let t = map_type("_geometry", "b", -1, 1, None, false, Some(("geometry", "b")), &no_enums());
+        let t = map_type(TypeRow { ndims: 1, element: Some(("geometry", "b")), ..TypeRow::plain("_geometry", "b", -1) }, &no_enums());
         assert!(!t.is_generatable());
         assert_eq!(t.describe(), "geometry[]");
     }
