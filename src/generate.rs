@@ -42,10 +42,14 @@ pub struct Bounds {
     /// `col = ANY (ARRAY[...])`. Written out verbatim: they are already valid
     /// SQL and re-rendering could only lose a cast.
     pub value_set: Option<Vec<String>>,
-    /// Every generated word is lowercase already, so this changes nothing
-    /// today. It is recorded anyway: relying on a coincidence in a word list
-    /// is not the same as honouring a constraint, and the day somebody adds
-    /// "Zulu" to that list is the day the coincidence ends.
+    /// The value has to equal its own lowercasing, from `col = lower(col)`.
+    ///
+    /// This used to be recorded and never used, because every word the
+    /// generator knew was lowercase already, with a note saying that relying
+    /// on a coincidence in a word list is not the same as honouring a
+    /// constraint. The coincidence ended when `nouns` arrived: `Ada Achebe`
+    /// and `Europe/Berlin` are not lowercase, and this is now what keeps rows
+    /// out of a column that insists.
     pub lowercase: bool,
 }
 
@@ -435,7 +439,7 @@ fn render(
             };
             // The column's name first, where it named something exactly. The
             // noun either produces a value that fits inside `limit` and is
-            // distinct for its step, or declines — and declining falls through
+            // distinct for its step, or declines, and declining falls through
             // to the path below, which is built for columns with no room.
             //
             // `row` rather than the step is what a *non*-unique noun is drawn
@@ -459,10 +463,11 @@ fn render(
             let mut text = match (named, unique, limit) {
                 (Some(named), _, _) => named,
                 // The row index has to survive the length limit, and appending
-                // it does not: `varchar(4)` cut "juliet-37" down to "juli" on
-                // every row, so a unique column produced the same four
-                // characters over and over. The index goes in first and the
-                // word fills whatever room is left over.
+                // it does not: `varchar(4)` cut a word plus its index down to
+                // the first four characters of the word on every row, so a
+                // unique column produced the same four characters over and
+                // over. The index goes in first and the word fills whatever
+                // room is left over.
                 (None, true, Some(limit)) => {
                     let limit = limit.max(1) as usize;
                     let tag = base36(step);
@@ -579,8 +584,8 @@ fn render(
         ColumnType::Json { .. } => Literal::text(&match (bounds.json_type.as_deref(), unique) {
             (Some("array"), false) => "[]".into(),
             (Some("array"), true) => format!("[{step}]"),
-            (Some("string"), false) => "\"alpha\"".to_string(),
-            (Some("string"), true) => format!("\"alpha-{step}\""),
+            (Some("string"), false) => "\"invoice\"".to_string(),
+            (Some("string"), true) => format!("\"invoice-{step}\""),
             (Some("number"), false) => "0".into(),
             (Some("number"), true) => step.to_string(),
             // Two values and one value respectively: these cannot be made
@@ -600,7 +605,7 @@ fn render(
         ColumnType::Bytea => {
             // A CHECK may pin the width exactly, which is what
             // `octet_length(col) = N` means and why it is recognised at all.
-            // An exact width if one was declared, otherwise eight — but never
+            // An exact width if one was declared, otherwise eight, but never
             // more than a byte ceiling allows, since `octet_length(col) <= N`
             // is a real limit on a bytea and not only on text.
             let ceiling = bounds.max_length.unwrap_or(i32::MAX);

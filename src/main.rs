@@ -59,6 +59,14 @@ struct Args {
     #[arg(long)]
     apply: bool,
 
+    /// Offer the refused tables to the database and keep the rows it accepts.
+    ///
+    /// Writes — a probe is a real INSERT inside a savepoint — so it is guarded
+    /// the same way --apply is, and without --apply the whole transaction is
+    /// rolled back and only the accepted SQL is printed.
+    #[arg(long)]
+    probe: bool,
+
     /// Empty the target tables first, in dependency order. Only with --apply.
     #[arg(long)]
     truncate: bool,
@@ -94,7 +102,7 @@ fn run() -> Result<std::process::ExitCode, String> {
     // before anything has been touched. Not a claim that the far end is
     // production — only that it is not this machine, which is a fact about the
     // string rather than a guess about the database.
-    let writing = args.apply || args.truncate;
+    let writing = args.apply || args.truncate || args.probe;
     if writing && !args.remote && !dsn::is_local(&args.dsn) {
         return Err(format!(
             "this would write to {}, which is not this machine.\n       \
@@ -111,6 +119,11 @@ fn run() -> Result<std::process::ExitCode, String> {
 
     let order = graph::order(&read);
     let mut verdict = classify::classify(&read, &order);
+    // Filled in by --probe, and printed apart from the tables that were
+    // understood: a row the database accepted and a row this could show was
+    // right are different kinds of confidence, and one number for both throws
+    // away the distinction the tool exists for.
+    let mut probed: Option<pgsow::probe::Outcome> = None;
 
     // Filtering happens after classification, so a table left out is simply
     // not written rather than being reported as refused. Those are different
@@ -175,12 +188,42 @@ fn run() -> Result<std::process::ExitCode, String> {
                 .map_err(|e| format!("could not empty the tables first: {e}"))?;
         }
 
-        match emit::apply(&mut client, &read, &verdict, &options) {
-            Ok(n) => eprintln!("pgsow: applied {n} statements"),
-            // The transaction rolled back, so the database is as it was.
-            Err(e) => return Err(format!("nothing was written — {e}")),
+        if args.probe {
+            let outcome = pgsow::probe::run(
+                &mut client,
+                &read,
+                &verdict,
+                &order,
+                &options,
+                true,
+                &mut |_| {},
+            )
+            .map_err(|e| format!("nothing was written — {e}"))?;
+            eprintln!("pgsow: applied {} statements", outcome.kept);
+            probed = Some(outcome);
+        } else {
+            match emit::apply(&mut client, &read, &verdict, &options) {
+                Ok(n) => eprintln!("pgsow: applied {n} statements"),
+                // The transaction rolled back, so the database is as it was.
+                Err(e) => return Err(format!("nothing was written — {e}")),
+            }
         }
-    } else if !args.plan {
+    } else if args.plan {
+        // Nothing is written and nothing is kept, but the question "what would
+        // I actually get" is worth an honest answer, and for --probe that
+        // answer is only knowable by asking. The transaction is rolled back.
+        if args.probe {
+            probed = Some(pgsow::probe::run(
+                &mut client,
+                &read,
+                &verdict,
+                &order,
+                &options,
+                false,
+                &mut |_| {},
+            )?);
+        }
+    } else {
         // Streamed rather than built and then written: a large schema at a
         // large row count is hundreds of megabytes, and there is no reason to
         // hold it when each statement is finished before the next begins.
@@ -192,12 +235,42 @@ fn run() -> Result<std::process::ExitCode, String> {
             // stdout, so the report on stderr does not mix prose into it.
             None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
         };
-        emit::write_sql(&mut target, &read, &verdict, &options)
-            .and_then(|()| target.flush())
-            .map_err(|e| format!("cannot write the SQL: {e}"))?;
+        if args.probe {
+            // The rows go in, the database rules on each, and the transaction
+            // is rolled back — so the only thing that survives is the SQL for
+            // the statements it kept.
+            use std::io::Write as _;
+            let mut failure = None;
+            let outcome = pgsow::probe::run(
+                &mut client,
+                &read,
+                &verdict,
+                &order,
+                &options,
+                false,
+                &mut |statement| {
+                    if failure.is_none() {
+                        if let Err(e) = writeln!(target, "\n{statement}") {
+                            failure = Some(e);
+                        }
+                    }
+                },
+            )?;
+            if let Some(e) = failure {
+                return Err(format!("cannot write the SQL: {e}"));
+            }
+            target
+                .flush()
+                .map_err(|e| format!("cannot write the SQL: {e}"))?;
+            probed = Some(outcome);
+        } else {
+            emit::write_sql(&mut target, &read, &verdict, &options)
+                .and_then(|()| target.flush())
+                .map_err(|e| format!("cannot write the SQL: {e}"))?;
+        }
     }
 
-    report(&read, &verdict, &rows, &dropped);
+    report(&read, &verdict, &rows, &dropped, probed.as_ref());
 
     // 0 everything fillable · 1 something refused · 2 could not read, so this
     // composes in a script without anybody parsing the prose above.
@@ -213,6 +286,7 @@ fn report(
     verdict: &classify::Verdict,
     rows: &filter::RowCounts,
     dropped: &BTreeSet<pgsow::schema::TableId>,
+    probed: Option<&pgsow::probe::Outcome>,
 ) {
     eprintln!(
         "pgsow: {} tables, {} fillable, {} refused ({:.0}% reach)",
@@ -221,6 +295,16 @@ fn report(
         verdict.refused.len(),
         verdict.reach() * 100.0,
     );
+
+    if let Some(outcome) = probed {
+        eprintln!(
+            "  of the refused, the database accepted {} and refused {} \
+             ({:.0}% reach with it asked)",
+            outcome.rescued.len(),
+            outcome.still_refused.len(),
+            outcome.reach(verdict) * 100.0,
+        );
+    }
 
     if !dropped.is_empty() {
         // Named separately from the refusals. A table left out by --exclude

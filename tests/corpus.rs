@@ -29,7 +29,7 @@
 //!     partition whose bounds cover it, and GitLab reports `no partition of
 //!     relation ... found for row`. Partitioned parents are not read at all,
 //!     which is why their children are refused for pointing at something
-//!     unread — but the parents themselves are simply absent.
+//!     unread, but the parents themselves are simply absent.
 //!
 //! Both were found by the `volume` benchmark below, which applies the *whole*
 //! dump rather than the filtered part, and both are named here rather than

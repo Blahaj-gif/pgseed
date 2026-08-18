@@ -18,7 +18,7 @@ Counted across the corpus, not estimated:
 | `PARTITION BY` | 3 of 18 | **106** (101 GitLab) |
 
 Neither is installed by the corpus gate, so neither can reject a row *in the
-gate* — and both do in reality. The `volume` benchmark applies the whole dump
+gate*, and both do in reality. The `volume` benchmark applies the whole dump
 and hits both immediately:
 
 ```
@@ -51,7 +51,7 @@ expression evaluator this project does not have. So, in order:
   measurable in an hour. Establishes the floor.
 - **A closed set over the trigger body**: no `RAISE`, no `ASSERT`, no call to
   another function, and the body a single `NEW.x := ...` or `RETURN NEW`.
-  Anything else refuses. Same shape as `checks` and `indexes` — and survey
+  Anything else refuses. Same shape as `checks` and `indexes`, and survey
   first, because the top shapes among 456 triggers are probably three idioms.
 
 **1c — partition routing.** A partitioned parent is not read at all today

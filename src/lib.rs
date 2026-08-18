@@ -19,6 +19,7 @@ pub mod indexes;
 pub mod introspect;
 pub mod nouns;
 pub mod partitions;
+pub mod probe;
 pub mod schema;
 pub mod triggers;
 pub mod volume;

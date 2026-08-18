@@ -10,7 +10,7 @@
 //!
 //! So: **the same closed-set discipline as `checks` and `indexes`, applied to
 //! column names.** A name is matched against exact shapes — the whole name,
-//! its last two segments, its last one — and either lands on a known noun or
+//! its last two segments, its last one, and either lands on a known noun or
 //! does not. Nothing is inferred from a substring, because `description_id` is
 //! not a description and `key_id` is not a key.
 //!
@@ -767,7 +767,7 @@ fn tail(last: &str) -> Option<Noun> {
 ///
 /// This is what makes a realistic value safe on a unique column. Reading the
 /// step as an odometer over the lists means `(digits, carry)` reconstructs it
-/// exactly, so two different steps cannot produce the same digits — and the
+/// exactly, so two different steps cannot produce the same digits, and the
 /// carry is `None` until the lists are genuinely exhausted, which for a
 /// forty-eight by forty-eight pair is 2,304 rows in.
 fn indices(rng: &mut ChaCha8Rng, step: Option<usize>, lengths: &[usize]) -> (Vec<usize>, usize) {
@@ -1253,7 +1253,7 @@ mod tests {
     #[test]
     fn a_unique_column_gets_a_distinct_value_every_time() {
         // The property the whole odometer exists for. Every noun, a thousand
-        // steps, no repeats — and no reliance on the values being unlikely to
+        // steps, no repeats, and no reliance on the values being unlikely to
         // collide, which is not what a unique constraint asks.
         let nouns = [
             Noun::GivenName,

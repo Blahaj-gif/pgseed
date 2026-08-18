@@ -606,8 +606,9 @@ fn adding_a_table_does_not_disturb_the_ones_already_there() {
 /// A unique column too narrow to hold the rows asked for.
 ///
 /// `varying_columns` picks a column whose type has no small domain, and text
-/// qualifies — but `varchar(4)` is text with four characters to play with, and
-/// "alpha-37" truncated to four is "alph" every time. `volume` does not treat
+/// qualifies, but `varchar(4)` is text with four characters to play with, and
+/// a word plus an index truncated to four is the same four every time.
+/// `volume` does not treat
 /// a length limit as a bound, so nothing caps the row count either. Whether
 /// this is a real hole is a question with an answer, so here it is asked.
 #[test]
@@ -901,4 +902,142 @@ fn a_column_restricted_to_a_list_of_values_gets_one_of_them() {
         .unwrap()
         .get(0);
     assert_eq!(kinds, 2, "both values should get used");
+}
+
+/// Run a probe against a fresh database and hand back what came of it.
+fn probed(ddl: &str, rows: usize, keep: bool) -> (Db, pgsow::probe::Outcome) {
+    let db = Db::start();
+    db.apply(ddl);
+
+    let mut client = db.client();
+    let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = graph::order(&schema);
+    let verdict = classify::classify(&schema, &order);
+    let outcome = pgsow::probe::run(
+        &mut client,
+        &schema,
+        &verdict,
+        &order,
+        &emit::Options::flat(1, rows),
+        keep,
+        &mut |_| {},
+    )
+    .expect("no table this claimed to understand should fail");
+    (db, outcome)
+}
+
+#[test]
+fn a_check_outside_the_closed_set_is_kept_when_the_database_allows_it() {
+    // `starts_with` is not a shape `checks` reads, so `notes` is refused —
+    // correctly, because nothing proved a row would satisfy it. A generated
+    // `body` happens to be a sentence, and a sentence beginning with anything
+    // at all fails this, so the second table stays refused. The first is a
+    // regular expression the generated slug does satisfy.
+    let (db, outcome) = probed(
+        "CREATE TABLE tags (
+             id   int PRIMARY KEY,
+             slug text NOT NULL CONSTRAINT tags_slug_shape CHECK (slug ~ '^[a-z-]+$')
+         );
+         CREATE TABLE notes (
+             id   int PRIMARY KEY,
+             body text NOT NULL CONSTRAINT notes_shape CHECK (starts_with(body, 'ZZZ'))
+         );",
+        5,
+        true,
+    );
+
+    let rescued: Vec<String> = outcome.rescued.iter().map(|id| id.name.clone()).collect();
+    let refused: Vec<String> = outcome
+        .still_refused
+        .iter()
+        .map(|id| id.name.clone())
+        .collect();
+    assert_eq!(rescued, vec!["tags".to_string()], "refused: {refused:?}");
+    assert_eq!(refused, vec!["notes".to_string()]);
+
+    // And the rows are really there, which is the only thing that settles it.
+    assert_eq!(count(&db, "tags"), 5);
+    assert_eq!(count(&db, "notes"), 0);
+}
+
+#[test]
+fn a_probe_that_is_not_kept_leaves_the_database_exactly_as_it_was() {
+    // What makes `--probe` usable while writing SQL to a file: the rows go in
+    // so the database can rule on them, and then none of them stay.
+    let (db, outcome) = probed(
+        "CREATE TABLE tags (
+             id   int PRIMARY KEY,
+             slug text NOT NULL CONSTRAINT tags_slug_shape CHECK (slug ~ '^[a-z-]+$')
+         );",
+        5,
+        false,
+    );
+    assert_eq!(outcome.rescued.len(), 1);
+    assert_eq!(count(&db, "tags"), 0);
+}
+
+#[test]
+fn a_rescued_parent_lets_its_children_through() {
+    // The reason probing is one pass rather than two. `orders` is refused only
+    // because `customers` was, and `customers` is refused only because of a
+    // CHECK nothing could read. Rescue the parent and the child follows — and
+    // the child's foreign key has to name a row the parent actually got, which
+    // is why the pool has to stay live across both.
+    let (db, outcome) = probed(
+        "CREATE TABLE customers (
+             ref  text PRIMARY KEY,
+             code text NOT NULL CONSTRAINT customers_code_shape CHECK (code ~ '^[a-z]')
+         );
+         CREATE TABLE orders (
+             id          int PRIMARY KEY,
+             customer_ref text NOT NULL REFERENCES customers(ref)
+         );",
+        4,
+        true,
+    );
+
+    let mut rescued: Vec<String> = outcome.rescued.iter().map(|id| id.name.clone()).collect();
+    rescued.sort();
+    assert_eq!(rescued, vec!["customers".to_string(), "orders".to_string()]);
+    assert_eq!(count(&db, "orders"), 4);
+    assert_eq!(
+        db.client()
+            .query_one(
+                "SELECT count(*) FROM orders o JOIN customers c ON c.ref = o.customer_ref",
+                &[]
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        4,
+        "every child names a parent that exists"
+    );
+}
+
+#[test]
+fn probing_never_costs_a_table_that_was_already_understood() {
+    // The guarantee that must not weaken. Everything `classify` accepted is
+    // still written, and a savepoint around each statement must not turn a
+    // broken promise into a quietly smaller number — `probe::run` returns an
+    // error instead, and `probed` unwraps it.
+    let (db, outcome) = probed(
+        "CREATE TABLE users (
+             id    int PRIMARY KEY,
+             email text NOT NULL UNIQUE
+         );
+         CREATE TABLE posts (
+             id      int PRIMARY KEY,
+             user_id int NOT NULL REFERENCES users(id),
+             title   text NOT NULL
+         );
+         CREATE TABLE odd (
+             id   int PRIMARY KEY,
+             body text NOT NULL CONSTRAINT odd_shape CHECK (starts_with(body, 'ZZZ'))
+         );",
+        6,
+        true,
+    );
+    assert_eq!(count(&db, "users"), 6);
+    assert_eq!(count(&db, "posts"), 6);
+    assert!(outcome.rescued.is_empty());
+    assert_eq!(outcome.still_refused.len(), 1);
 }

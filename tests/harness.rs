@@ -3,7 +3,7 @@
 //! Downloaded and started by `postgresql_embedded` rather than installed, and
 //! rather than run in Docker. That is not a convenience: the whole correctness
 //! argument of this tool is that *the database adjudicates*, so the tests need
-//! a database and not a model of one — and a test suite that only runs where
+//! a database and not a model of one, and a test suite that only runs where
 //! somebody remembered to install Postgres is a test suite that stops running.
 #![allow(dead_code)]
 

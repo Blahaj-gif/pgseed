@@ -156,7 +156,7 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
             // Every value this generates is at least one character long, so a
             // column that must not be empty already is not.
             Meaning::NonEmpty { column } => table.column(&column).is_some(),
-            // A floor on the length is met by padding — but only where there
+            // A floor on the length is met by padding, but only where there
             // is room to pad into. A column declared `varchar(8)` and obliged
             // to hold twelve characters has no satisfying row, and reading
             // both rules and then writing eight characters anyway is exactly
@@ -176,7 +176,7 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
                 // At least one of them has to end up holding a value, so at
                 // least one must not be under an obligation to be null. Every
                 // one of GitLab's `ai_tool_rules` permission columns is, from
-                // a separate `(col IS NULL) OR ...` on each — and the two
+                // a separate `(col IS NULL) OR ...` on each, and the two
                 // rules together have no satisfying row.
                 columns.iter().any(|c| !table.check_forces_null(c))
                     && crate::generate::filled_column(table, &columns).is_some()
@@ -335,7 +335,7 @@ pub fn classify(schema: &Schema, order: &Order) -> Verdict {
                 continue;
             }
             // `(a IS NOT NULL) OR (b IS NOT NULL)` needs only one of them to
-            // hold a value — but if every one is a foreign key and every one
+            // hold a value, but if every one is a foreign key and every one
             // of those parents is refused, they all come out NULL and none
             // does. Weaker than the exactly-one rule below and checked over
             // the whole group rather than one key at a time, because one

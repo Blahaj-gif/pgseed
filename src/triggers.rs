@@ -2,7 +2,7 @@
 //!
 //! A trigger is a rule about what may be written, and nothing else here could
 //! see one. Discourse has four that raise on insert — `topic_id in
-//! topic_timers is readonly` — and rows written to those tables are rejected
+//! topic_timers is readonly`, and rows written to those tables are rejected
 //! however carefully every constraint was satisfied.
 //!
 //! Refusing every table that carries an insert trigger would be correct and

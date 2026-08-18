@@ -1,7 +1,7 @@
 //! What the corpus's triggers actually do.
 //!
 //! A survey, not an assertion. The plan offered two ways to handle a trigger —
-//! refuse every table carrying one, or read a closed set of bodies — and the
+//! refuse every table carrying one, or read a closed set of bodies, and the
 //! choice between them is a question about real triggers rather than a matter
 //! of taste. This counts them.
 //!

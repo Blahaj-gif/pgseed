@@ -153,7 +153,7 @@ fn a_check_outside_the_closed_set_refuses_its_table_against_a_real_database() {
     // is rejected by Postgres.
     let naive = db
         .client()
-        .batch_execute("INSERT INTO targets (id, code) VALUES (1, 'alpha');");
+        .batch_execute("INSERT INTO targets (id, code) VALUES (1, 'GB-EDI');");
     assert!(
         naive.is_err(),
         "the database should have rejected a plain word"

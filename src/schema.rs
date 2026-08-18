@@ -2,7 +2,7 @@
 //!
 //! Deliberately not a faithful model of Postgres. It records the things that
 //! decide whether a row can be produced — the type, whether null is allowed,
-//! what it points at, what must be unique — and records everything else as a
+//! what it points at, what must be unique, and records everything else as a
 //! reason to refuse rather than as a field to interpret later.
 //!
 //! The distinction that matters most in this file is between a constraint this

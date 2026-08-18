@@ -125,7 +125,7 @@ fn column(text: &str) -> Option<String> {
         Some((left, right)) => {
             // Only a cast that keeps distinctness. `(name)::text` is the
             // column `name` for every purpose here, but `(created_at)::date`
-            // maps many timestamps onto one day — and reading it as the bare
+            // maps many timestamps onto one day, and reading it as the bare
             // column claims a unique index on it is satisfied by making
             // `created_at` distinct, which it is not.
             let target = right.trim().trim_end_matches("[]").to_ascii_lowercase();
@@ -236,7 +236,7 @@ fn strip_modifiers(part: &str) -> &str {
 /// row, so an index built on them cannot either.
 ///
 /// Deliberately short. `to_date` is not here and never will be, because
-/// `to_date('bogus', 'YYYY-MM-DD')` raises — and a function that raises on
+/// `to_date('bogus', 'YYYY-MM-DD')` raises, and a function that raises on
 /// some inputs is exactly the kind that rejects a row.
 /// The SQL string delimiter, written as a code point so that quoting it
 /// through three layers of tooling stops being a source of bugs.

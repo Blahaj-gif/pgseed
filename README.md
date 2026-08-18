@@ -29,6 +29,7 @@ No codegen step. No generated client. No API key. No runtime — one binary.
 | `--apply` | write the rows, in one transaction |
 | `--truncate` | empty the targets first, in dependency order. Never CASCADE |
 | `--allow-nonempty` | write even though the targets already hold rows |
+| `--probe` | offer the refused tables to the database and keep the rows it accepts |
 | `--remote` | write to a database that is not on this machine |
 
 The last two are the only guards, and both are questions rather than guesses.
@@ -70,6 +71,58 @@ every migration in it applies — so the harness counts the constraints a failed
 one costs, and each schema has a ceiling on that which a regression trips. The corpus is deliberately not written here — a
 hand-made one would only contain the constructs its author remembered to
 handle, which measures agreement rather than accuracy.
+
+## Asking the database — `--probe`
+
+Reach by reasoning alone sits at 63%, and for a long time the conclusion here
+was that 80% was structurally unreachable: the remaining tables are refused for
+a CHECK outside the closed set, a trigger whose body might raise, a partition
+bounded by a range, and reading more of them has a floor.
+
+**That conclusion was wrong, and it was wrong in an interesting way.** It
+answered *can this be reasoned to be correct?* when the rule asks something
+weaker and better: never emit a row that cannot be **shown** to satisfy every
+constraint that was read. A row Postgres has accepted has been shown to satisfy
+every constraint, including the ones that were never read at all — and a
+savepoint makes that a question you can ask and take back.
+
+| | reach | GitLab | Sourcegraph |
+|---|---:|---:|---:|
+| reasoning alone | 63.2% | 40% | 42% |
+| with `--probe` | **86.2%** | **77%** | **83%** |
+
+Each table's INSERT goes in behind a savepoint. Kept, it stands; refused, it
+rolls back and the refusal is reported exactly as before. Without `--apply` the
+whole transaction is rolled back at the end and only the accepted SQL is
+printed, so a database you can write to gives you a seed file for one you
+cannot.
+
+**The guarantee for the understood tables does not move.** One of them failing
+under a probe is an error that aborts the run, not a quietly smaller number —
+which is how the key-pool bug below was caught rather than absorbed.
+
+What it costs, stated rather than implied:
+
+- **It writes.** A probe is a real INSERT. The same guard that protects
+  `--apply` protects this, and `--probe` alone still rolls everything back.
+- **Triggers fire.** Whatever a trigger does inside the transaction is rolled
+  back with it; whatever it does outside one — a foreign data wrapper, an
+  untrusted extension touching the filesystem — is not.
+- **Sequences do not roll back.** A refused probe still spends the numbers it
+  drew.
+- **It is not a solver and does not retry.** A row is generated exactly as it
+  would have been, offered once, and kept or discarded. Narrowing a value until
+  it fits would be the expression evaluator this project does not have, wearing
+  a disguise.
+
+The report keeps the two apart, because a table filled because it was
+understood and a table filled because the database allowed it are different
+kinds of confidence:
+
+```
+pgsow: 1057 tables, 418 fillable, 639 refused (40% reach)
+  of the refused, the database accepted 392 and refused 247 (77% reach with it asked)
+```
 
 ## Status
 
@@ -131,7 +184,7 @@ looking similar.
 | shape | how it is satisfied |
 |---|---|
 | `char_length(col) <= N` | what `varchar(N)` already means |
-| `char_length(col) >= N`, `> N` | padded up to, where the column has room — and refused where it has not |
+| `char_length(col) >= N`, `> N` | padded up to, where the column has room, and refused where it has not |
 | `col IS NOT NULL` | a column this never writes NULL into |
 | `octet_length(col) = N` / `<= N` | a fixed width, or a ceiling |
 | `col > N`, `col >= N` | a floor on the generated number |
@@ -213,6 +266,7 @@ person columns are the exception, and they are the exception on purpose.
 | Types | integers, numerics with precision, text with declared length, uuid, dates, timestamps, json, bytea, enums with their labels, domains, arrays |
 | Generated & identity columns | left out of the insert entirely, not defaulted |
 | Refusal contagion | a table whose required key points at a refused, or unread, table is refused too, all the way down |
+| Probing | each refused table offered to the database behind a savepoint, and kept if it is accepted |
 | Row counts | capped at what a table can hold — a `bool UNIQUE` holds two rows, a join table holds as many as it has pairs, and a cap on a parent caps its children |
 | Composite unique keys | one column varies, or where none has room to spare the columns are walked as digits of one number |
 

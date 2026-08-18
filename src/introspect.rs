@@ -105,7 +105,7 @@ const CONSTRAINTS_SQL: &str = "
 /// An **expression index** constrains the data whether or not it enforces
 /// uniqueness, because the expression is evaluated on every row inserted.
 /// Discourse indexes `((data)::jsonb ->> 'display_username')` on a `varchar`
-/// column, and that index is not unique — but an ordinary word written to
+/// column, and that index is not unique, but an ordinary word written to
 /// `data` fails to cast and the insert is rejected. An index that cannot be
 /// violated can still refuse a row.
 ///

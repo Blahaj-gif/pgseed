@@ -20,14 +20,63 @@ use crate::schema::{quote_ident, Schema, Table, TableId};
 /// caller asked to stop. A tiny shim so the generation code below can go on
 /// saying `out.push(...)` and mean "hand this over" rather than "keep this".
 struct Emitter<'a> {
-    emit: &'a mut dyn FnMut(&str) -> bool,
+    emit: &'a mut dyn FnMut(Written<'_>) -> Took,
     stopped: bool,
+}
+
+/// What became of a statement once it was handed over.
+///
+/// Only `probe` ever says anything but `Kept`, and it is the whole reason this
+/// exists: the key pool records what a table's INSERT *would* write, and a
+/// child draws its foreign keys from it. If that INSERT was offered to the
+/// database and refused, the pool is holding rows that do not exist, and the
+/// next child points at them. Four corpus schemas failed exactly that way
+/// before this was here, each as a foreign key violation on a table the tool
+/// had promised it could fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Took {
+    /// It stands. What it wrote is available to children.
+    Kept,
+    /// It did not happen, so nothing may reference what it would have written.
+    Rejected,
+    /// Stop here.
+    Stop,
+}
+
+/// A statement, and the table it is about where there is one.
+///
+/// The consumer needs the table as well as the text: `probe` has to know which
+/// rows it is allowed to lose. Reading the name back out of the SQL would work
+/// and would be one more thing that has to stay in step with the emitter, so
+/// it is handed over instead.
+#[derive(Debug, Clone, Copy)]
+pub struct Written<'a> {
+    pub sql: &'a str,
+    /// `None` for the statements that belong to no single table — deferring
+    /// the constraints, and repairing a cycle after the fact.
+    pub table: Option<&'a TableId>,
 }
 
 impl Emitter<'_> {
     fn push(&mut self, statement: impl AsRef<str>) {
-        if !self.stopped {
-            self.stopped = !(self.emit)(statement.as_ref());
+        self.about(None, statement);
+    }
+
+    /// Hand a statement over, and say whether what it wrote can be relied on.
+    fn about(&mut self, table: Option<&TableId>, statement: impl AsRef<str>) -> bool {
+        if self.stopped {
+            return false;
+        }
+        match (self.emit)(Written {
+            sql: statement.as_ref(),
+            table,
+        }) {
+            Took::Kept => true,
+            Took::Rejected => false,
+            Took::Stop => {
+                self.stopped = true;
+                false
+            }
         }
     }
 
@@ -118,7 +167,7 @@ fn borrow_from_database(
         .collect();
     // The offset wraps on how many rows the parent actually has. It used to be
     // the plain row index, which walks off the end the moment the parent holds
-    // fewer rows than this table — and since row counts started respecting
+    // fewer rows than this table, and since row counts started respecting
     // what a table can hold, that is no longer rare. Past the end the subquery
     // returns NULL, and a NULL foreign key is either a violation or a lie.
     //
@@ -163,22 +212,22 @@ pub fn write_sql(
         b"BEGIN;
 ",
     )?;
-    for_each_statement(schema, verdict, options, &mut |statement| match writer
+    for_each_statement(schema, verdict, options, &mut |written| match writer
         .write_all(
             b"
 ",
         )
-        .and_then(|()| writer.write_all(statement.as_bytes()))
+        .and_then(|()| writer.write_all(written.sql.as_bytes()))
         .and_then(|()| {
             writer.write_all(
                 b"
 ",
             )
         }) {
-        Ok(()) => true,
+        Ok(()) => Took::Kept,
         Err(e) => {
             failure = Some(e);
-            false
+            Took::Stop
         }
     });
     if let Some(e) = failure {
@@ -203,18 +252,18 @@ pub fn apply(
     options: &Options,
 ) -> Result<usize, postgres::Error> {
     let mut transaction = client.transaction()?;
-    let mut written = 0usize;
+    let mut count = 0usize;
     let mut failure = None;
-    for_each_statement(schema, verdict, options, &mut |statement| match transaction
-        .batch_execute(statement)
+    for_each_statement(schema, verdict, options, &mut |written| match transaction
+        .batch_execute(written.sql)
     {
         Ok(()) => {
-            written += 1;
-            true
+            count += 1;
+            Took::Kept
         }
         Err(e) => {
             failure = Some(e);
-            false
+            Took::Stop
         }
     });
     if let Some(e) = failure {
@@ -223,7 +272,7 @@ pub fn apply(
         return Err(e);
     }
     transaction.commit()?;
-    Ok(written)
+    Ok(count)
 }
 
 /// Every statement needed, in order, without a transaction around them.
@@ -232,9 +281,9 @@ pub fn apply(
 /// drift, and the one nobody tested would be the one somebody ran.
 pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<String> {
     let mut out = Vec::new();
-    for_each_statement(schema, verdict, options, &mut |statement| {
-        out.push(statement.to_string());
-        true
+    for_each_statement(schema, verdict, options, &mut |written| {
+        out.push(written.sql.to_string());
+        Took::Kept
     });
     out
 }
@@ -250,7 +299,7 @@ pub fn for_each_statement(
     schema: &Schema,
     verdict: &Verdict,
     options: &Options,
-    emit: &mut dyn FnMut(&str) -> bool,
+    emit: &mut dyn FnMut(Written<'_>) -> Took,
 ) {
     let mut out = Emitter {
         emit,
@@ -290,7 +339,10 @@ pub fn for_each_statement(
             // Every column is generated or defaulted, so the only thing to say
             // is "a row exists".
             for _ in 0..rows {
-                out.push(format!("INSERT INTO {} DEFAULT VALUES;", id.quoted()));
+                let _ = out.about(
+                    Some(id),
+                    format!("INSERT INTO {} DEFAULT VALUES;", id.quoted()),
+                );
             }
             continue;
         }
@@ -367,7 +419,7 @@ pub fn for_each_statement(
                 } else if !column.type_.is_generatable() {
                     // No value can be produced. `classify` refuses the table
                     // when such a column is required, so reaching here means
-                    // it is nullable — and NULL is the honest answer. The old
+                    // it is nullable, and NULL is the honest answer. The old
                     // one was the literal `DEFAULT`, which is legal as a bare
                     // column value and a syntax error inside `ARRAY[...]`.
                     Literal::null()
@@ -393,8 +445,12 @@ pub fn for_each_statement(
             written.push(this_row);
         }
 
-        out.push(statement);
-        pool.insert(id.clone(), written);
+        // Only what the consumer kept goes into the pool. A child drawing from
+        // it is naming a row by its key, and a key from a statement that was
+        // rolled back names nothing.
+        if out.about(Some(id), statement) {
+            pool.insert(id.clone(), written);
+        }
     }
 
     out.extend(repair_cycles(schema, verdict));

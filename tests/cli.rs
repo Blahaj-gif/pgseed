@@ -111,7 +111,7 @@ fn apply_writes_rows_and_truncate_lets_it_be_run_twice() {
     assert_eq!(rows(&db, "users"), 7);
 
     // The same seed generates the same primary keys, so a second run collides.
-    // That is determinism working, not a bug — and the reason --truncate is
+    // That is determinism working, not a bug, and the reason --truncate is
     // the flag that makes a repeated run mean anything.
     let (_, _, again) = run(&db.url, &["--apply", "--rows", "7"]);
     assert_eq!(

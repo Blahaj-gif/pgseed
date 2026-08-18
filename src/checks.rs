@@ -81,7 +81,7 @@ pub enum Meaning {
     CardinalityLimit { column: String, max: i32 },
     /// `char_length(col) >= N`, or `> N`, or the same with `length`. A floor
     /// rather than a ceiling, and satisfied by padding a value that falls
-    /// short. Eight of these across the corpus, which is few — but a schema
+    /// short. Eight of these across the corpus, which is few, but a schema
     /// somebody writes by hand rather than generates is full of
     /// `char_length(title) > 0`, and that is the reader this refuses to serve
     /// if it does not read them.
@@ -95,7 +95,7 @@ pub enum Meaning {
     /// which is what happens anyway.
     AtLeastOneNonNull { columns: Vec<String> },
     /// `col = ANY (ARRAY['a', 'b'])`. A value set, which is an enum written
-    /// out longhand — and satisfied the same way, by writing one of them.
+    /// out longhand, and satisfied the same way, by writing one of them.
     /// The literals are kept exactly as Postgres printed them, casts and all,
     /// because that is already valid SQL and re-rendering could only lose
     /// something.
