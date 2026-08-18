@@ -1,6 +1,6 @@
 {
   "why": "Real schemas, not written by this project. A hand-written corpus would only contain the constructs its author remembered to handle, which measures agreement rather than accuracy. The files are fetched on purpose and are not committed: they belong to their projects, and the URL is the durable part.",
-  "fetch": "python tests/corpus/fetch.py",
+  "fetch": "python tests/corpus/fetch.py  (set GITHUB_TOKEN to lift the API rate limit)",
   "schemas": [
     {
       "name": "powerdns",
@@ -121,6 +121,43 @@
       "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/hexpm/hexpm/main/priv/repo/structure.sql",
       "notes": "Ecto, and a package registry \u2014 versions, checksums, wide unique keys."
+    },
+    {
+      "name": "mattermost",
+      "file": "mattermost.sql",
+      "project": "mattermost/mattermost",
+      "licence": "Apache-2.0 / AGPL-3.0",
+      "kind": "directory",
+      "repo": "mattermost/mattermost",
+      "path": "server/channels/db/migrations/postgres",
+      "suffix": ".up.sql",
+      "url": "https://github.com/mattermost/mattermost/tree/master/server/channels/db/migrations/postgres",
+      "notes": "A replayed migration set rather than a snapshot \u2014 the first of its kind here, and the reason the fetcher can read a directory at all."
+    },
+    {
+      "name": "vaultwarden",
+      "file": "vaultwarden.sql",
+      "project": "dani-garcia/vaultwarden",
+      "licence": "AGPL-3.0",
+      "kind": "directory",
+      "repo": "dani-garcia/vaultwarden",
+      "path": "migrations/postgresql",
+      "suffix": "up.sql",
+      "nested": true,
+      "url": "https://github.com/dani-garcia/vaultwarden/tree/main/migrations/postgresql",
+      "notes": "Diesel, one folder per migration. Small, and a Rust project's habits rather than a web framework's."
+    },
+    {
+      "name": "kratos",
+      "file": "kratos.sql",
+      "project": "ory/kratos",
+      "licence": "Apache-2.0",
+      "kind": "directory",
+      "repo": "ory/kratos",
+      "path": "persistence/sql/migrations/sql",
+      "suffix": ".postgres.up.sql",
+      "url": "https://github.com/ory/kratos/tree/master/persistence/sql/migrations/sql",
+      "notes": "Identity management, written dialect-by-dialect \u2014 the Postgres files only."
     }
   ]
 }

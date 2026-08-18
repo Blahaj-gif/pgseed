@@ -397,6 +397,12 @@ fn reach_against_real_schemas() {
         ("sourcegraph_insights", 0),
         ("plausible", 1),
         ("hexpm", 2),
+        // Replayed migration directories rather than a snapshot of a finished
+        // schema. A ceiling above zero is expected here and is measured: a
+        // replay only reaches the real shape if every migration applies.
+        ("mattermost", 3),
+        ("vaultwarden", 0),
+        ("kratos", 0),
     ] {
         measure(name, &Path::new("tests/corpus").join(format!("{name}.sql")), max_lost);
     }

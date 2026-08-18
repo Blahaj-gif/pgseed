@@ -37,7 +37,7 @@ Reading a database name for the word `prod` stops nobody who called theirs
 So instead: **is the host this machine**, and **do the target tables already
 hold rows** — two facts a person can answer instantly and a tool cannot.
 
-## Reach, on fifteen schemas nobody here wrote
+## Reach, on eighteen schemas nobody here wrote
 
 | schema | tables | fillable | reach |
 |---|---:|---:|---:|
@@ -46,20 +46,26 @@ hold rows** — two facts a person can answer instantly and a tool cannot.
 | Kong | 9 | 8 | 89% |
 | Sourcegraph *(codeintel)* | 13 | 11 | 85% |
 | Harbor | 21 | 21 | 100% |
+| Ory Kratos *(replayed migrations)* | 23 | 23 | 100% |
 | Sourcegraph *(insights)* | 21 | 16 | 76% |
 | hex.pm | 36 | 20 | 56% |
+| Vaultwarden *(replayed migrations)* | 29 | 29 | 100% |
 | Temporal | 37 | 36 | 97% |
 | Plausible | 41 | 38 | 93% |
+| Mattermost *(replayed migrations)* | 80 | 75 | 94% |
 | PostgREST *(test fixtures — deliberately awkward)* | 132 | 127 | 96% |
 | Synapse | 134 | 127 | 95% |
 | Lago | 137 | 116 | 85% |
 | Sourcegraph *(frontend)* | 180 | 75 | 42% |
 | Discourse | 351 | 327 | 93% |
 | GitLab | 956 | 241 | 25% |
-| **total** | **2,083** | **1,173** | **56%** |
+| **total** | **2,215** | **1,300** | **59%** |
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
-`tests/corpus/sources.json`. The corpus is deliberately not written here — a
+`tests/corpus/sources.json`. Three are *replayed* migration directories rather
+than a snapshot of a finished schema, which only reaches the real shape if
+every migration in it applies — so the harness counts the constraints a failed
+one costs, and each schema has a ceiling on that which a regression trips. The corpus is deliberately not written here — a
 hand-made one would only contain the constructs its author remembered to
 handle, which measures agreement rather than accuracy.
 
@@ -71,7 +77,7 @@ writes SQL; `--plan` reports what it would do and writes nothing.
 Every row it produces is checked by the only authority that matters: a test
 generates for each corpus schema at the default fifty rows, applies the result
 to a real Postgres, and fails if a single statement is rejected. It currently
-generates **1,585 statements across the fifteen schemas and Postgres accepts
+generates **1,712 statements across the eighteen schemas and Postgres accepts
 every one**. The gate is zero, not a percentage — the whole thesis is that the
 database adjudicates, so one row it refuses is a failure rather than a figure
 to be pleased with.
