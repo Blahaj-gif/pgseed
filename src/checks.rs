@@ -159,7 +159,21 @@ fn call_argument<'t>(text: &'t str, name: &str) -> Option<&'t str> {
 /// is `kroki_url`. Without this, the same length limit written with a cast
 /// went unrecognised — nine of them in the corpus.
 fn column_cast(text: &str) -> Option<String> {
-    column_name(unwrap_parens(text).split("::").next()?.trim())
+    let text = unwrap_parens(text.trim());
+    // Only where the cast is the outermost thing. `(data)::jsonb ->> 'x'`
+    // starts with one and is an expression; taking the text before the first
+    // `::` reads it as the column `data` and drops the rest of the rule on the
+    // floor. Found in the index reader, which has the same shape, and fixed
+    // here before it could bite.
+    let Some((left, right)) = text.split_once("::") else {
+        return column_name(text);
+    };
+    let right = right.trim();
+    let is_type_name = !right.is_empty()
+        && right
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ');
+    is_type_name.then(|| column_name(left.trim())).flatten()
 }
 
 /// An integer bound, written `255` or `(255)::integer`.
@@ -490,6 +504,27 @@ mod tests {
         assert_eq!(
             interpret("CHECK ((octet_length(target_sha) <= 64)) NOT VALID"),
             Meaning::ByteLimit { column: "target_sha".into(), max: 64 }
+        );
+    }
+
+    #[test]
+    fn an_expression_that_merely_starts_with_a_cast_is_not_a_column() {
+        // The bug this is here for: reading `(data)::jsonb ->> 'x'` as the
+        // column `data` would accept a length limit on a value that is not
+        // that column, and in the index reader it dropped a rule that really
+        // does reject rows.
+        assert_eq!(
+            interpret("CHECK ((char_length(((data)::jsonb ->> 'x'::text)) <= 20))"),
+            Meaning::Unknown
+        );
+        assert_eq!(
+            interpret("CHECK ((num_nonnulls(((a)::jsonb ->> 'x'::text), b) = 1))"),
+            Meaning::Unknown
+        );
+        // And the ordinary cast still reads as the column it is.
+        assert_eq!(
+            interpret("CHECK ((char_length((name)::text) <= 20))"),
+            Meaning::LengthLimit { column: "name".into(), max: 20 }
         );
     }
 

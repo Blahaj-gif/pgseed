@@ -257,3 +257,65 @@ fn enums_domains_and_arrays_come_back_as_themselves() {
     let verdict = pgsow::classify::classify(&schema, &order);
     assert!(verdict.refused[0].1.iter().any(|r| r.explain().contains("positive")));
 }
+
+/// A unique index reaches the schema model as a unique key.
+#[test]
+fn a_unique_index_is_read_as_the_key_it_is() {
+    let db = Db::start();
+    db.apply(
+        "CREATE TABLE oauth_applications (
+             id bigint NOT NULL,
+             uid character varying NOT NULL,
+             secret character varying NOT NULL
+         );
+         CREATE UNIQUE INDEX index_oauth_applications_on_uid
+             ON oauth_applications USING btree (uid);
+         CREATE INDEX index_oauth_applications_on_secret
+             ON oauth_applications USING btree (secret);",
+    );
+    let mut client = db.client();
+    let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let table = schema.get(&pgsow::schema::TableId::new("public", "oauth_applications")).unwrap();
+
+    let names: Vec<&str> = table.unique_keys.iter().map(|k| k.name.as_str()).collect();
+    assert!(
+        names.contains(&"index_oauth_applications_on_uid"),
+        "the unique index is missing: {names:?}"
+    );
+    assert!(
+        !names.contains(&"index_oauth_applications_on_secret"),
+        "a plain index is not a unique key: {names:?}"
+    );
+    assert!(table.checks.is_empty(), "nothing here should refuse: {:?}", table.checks);
+}
+
+/// A unique index stays visible when a foreign key points at its column.
+///
+/// `pg_constraint.conindid` is not only set by the constraint that *owns* an
+/// index. A foreign key fills it in too, pointing at the unique index on the
+/// **referenced** side that it validates against. Excluding every index named
+/// by any constraint therefore hid exactly the indexes that other tables
+/// depend on — the most load-bearing ones in the schema — and GitLab's
+/// `index_oauth_applications_on_uid` duplicated on the second row because of
+/// it.
+#[test]
+fn a_unique_index_referenced_by_a_foreign_key_is_still_read() {
+    let db = Db::start();
+    db.apply(
+        "CREATE TABLE apps (id bigint PRIMARY KEY, uid text NOT NULL);
+         CREATE UNIQUE INDEX index_apps_on_uid ON apps USING btree (uid);
+         CREATE TABLE grants (
+             id bigint PRIMARY KEY,
+             app_uid text NOT NULL REFERENCES apps(uid)
+         );",
+    );
+    let mut client = db.client();
+    let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let apps = schema.get(&pgsow::schema::TableId::new("public", "apps")).unwrap();
+
+    let names: Vec<&str> = apps.unique_keys.iter().map(|k| k.name.as_str()).collect();
+    assert!(
+        names.contains(&"index_apps_on_uid"),
+        "a foreign key pointing at it must not hide it: {names:?}"
+    );
+}

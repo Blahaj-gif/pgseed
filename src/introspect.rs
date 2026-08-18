@@ -115,6 +115,14 @@ const CONSTRAINTS_SQL: &str = "
 /// `pg_constraint` — so reading only constraints missed 1,397 of them across
 /// the nine corpus schemas, GitLab alone accounting for 1,046.
 ///
+/// The exclusion is only for constraints that *own* an index — a primary key,
+/// a unique constraint, an exclusion constraint — because those arrive through
+/// `pg_constraint` already. A foreign key also fills in `conindid`, pointing at
+/// the unique index on the **referenced** side that it validates against, and
+/// excluding on that made every referenced unique index invisible. GitLab's
+/// `index_oauth_applications_on_uid` is one, and it duplicated on the second
+/// row because of it.
+///
 /// `indnkeyatts` rather than `indnatts`: columns added with INCLUDE are stored
 /// in the index and are not part of what it makes unique. `indkey` is an
 /// `int2vector`, which is subscripted from zero — so the slice ends at
@@ -139,7 +147,9 @@ const UNIQUE_INDEXES_SQL: &str = "
       AND ix.indislive
       AND n.nspname = ANY($1)
       AND NOT EXISTS (
-            SELECT 1 FROM pg_constraint con WHERE con.conindid = ix.indexrelid)
+            SELECT 1 FROM pg_constraint con
+            WHERE con.conindid = ix.indexrelid
+              AND con.contype IN ('p', 'u', 'x'))
     ORDER BY n.nspname, c.relname, i.relname";
 
 const ENUMS_SQL: &str = "
@@ -305,43 +315,46 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
         let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
         let Some(table) = schema.tables.get_mut(&id) else { continue };
         let name: String = row.get("index_name");
-        let columns: Vec<String> = row.try_get("columns").unwrap_or_default();
-        let key_columns: i16 = row.get("indnkeyatts");
+        let definition: String = row.get("definition");
+        let unique: bool = row.get("is_unique");
 
         // An index over an expression — `lower(email)` — is a rule about a
         // computed value, and making the underlying column distinct does not
         // make the expression distinct. There is no closed form for it here,
         // so it is recorded as a check and refuses its table, the same as any
         // other rule this cannot show it satisfies.
-        // An index over an expression — `lower(email)`, `(data)::jsonb ->>
-        // 'x'` — is a rule about a computed value. Making the underlying
-        // column distinct does not make the expression distinct, and an
-        // expression that fails to evaluate rejects the row outright. There is
-        // no closed form for either here, so it is recorded as a check and
-        // refuses its table like any other rule this cannot show it satisfies.
-        if row.get::<_, bool>("has_expression") || columns.len() != key_columns as usize {
-            // Quoted verbatim, like every other rule this refuses. Saying
-            // only "over an expression" tells a reader nothing about what
-            // they would have to change, and leaves the closed set with
-            // nothing to match against when it comes to be widened.
-            table.checks.push(CheckConstraint {
-                name: name.clone(),
-                definition: row.get("definition"),
-            });
-            continue;
+        match crate::indexes::interpret(&definition) {
+            // Plain columns. Unique makes them a key; not unique asks nothing.
+            crate::indexes::Requirement::Columns(columns) => {
+                if unique {
+                    table.unique_keys.push(UniqueKey { name, columns, is_primary: false });
+                }
+            }
+            // Every expression is `lower(col)`, which cannot fail — so a
+            // non-unique one constrains nothing at all. A unique one is a key
+            // over the underlying columns, because every string generated here
+            // is lower case already and `lower(col)` is therefore `col`. That
+            // last part is recorded rather than assumed: the lowercase rule
+            // goes in as a check the generator honours, so the day the word
+            // list gains a capital letter this still holds.
+            crate::indexes::Requirement::Lowered { columns, lowered } => {
+                for column in lowered {
+                    table.checks.push(CheckConstraint {
+                        name: format!("{name}:lower({column})"),
+                        definition: format!("CHECK (({column} = lower({column})))"),
+                    });
+                }
+                if unique {
+                    table.unique_keys.push(UniqueKey { name, columns, is_primary: false });
+                }
+            }
+            // Anything else refuses the table, quoting the index back. An
+            // expression that cannot be read might fail on every row, and an
+            // index that enforces no uniqueness at all can still reject one.
+            crate::indexes::Requirement::Unknown => {
+                table.checks.push(CheckConstraint { name, definition });
+            }
         }
-
-        // Not unique and not an expression: it constrains nothing, and only
-        // arrived here because the query asks for both kinds at once.
-        if !row.get::<_, bool>("is_unique") {
-            continue;
-        }
-
-        // A partial index constrains only the rows matching its predicate.
-        // Treating it as constraining every row is *stricter* than the real
-        // rule, and stricter is the safe direction: rows that are all distinct
-        // satisfy a requirement that only some of them be.
-        table.unique_keys.push(UniqueKey { name, columns, is_primary: false });
     }
 
     for row in client.query(CONSTRAINTS_SQL, &[&schemas])? {

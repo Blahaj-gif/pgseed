@@ -255,7 +255,8 @@ fn measure(name: &str, path: &Path, max_lost: usize) {
                 // this project was built to refuse rather than commit.
                 if matches!(code.as_str(), "23514" | "22000" | "23503") {
                     let head: String =
-                        statement.lines().next().unwrap_or("").chars().take(60).collect();
+                        statement.lines().take(4).collect::<Vec<_>>().join(" ")
+                            .chars().take(320).collect();
                     println!("      DOCTRINE {code}: {} | {head}",
                         e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().into()));
                 }

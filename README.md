@@ -47,10 +47,10 @@ hold rows** — two facts a person can answer instantly and a tool cannot.
 | Harbor | 21 | 21 | 100% |
 | Temporal | 37 | 36 | 97% |
 | PostgREST *(test fixtures — deliberately awkward)* | 73 | 72 | 99% |
-| Synapse | 134 | 129 | 96% |
-| Discourse | 351 | 349 | 99% |
-| GitLab | 956 | 173 | 18% |
-| **total** | **1,590** | **796** | **50%** |
+| Synapse | 134 | 127 | 95% |
+| Discourse | 351 | 327 | 93% |
+| GitLab | 956 | 241 | 25% |
+| **total** | **1,590** | **840** | **53%** |
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. The corpus is deliberately not written here — a
@@ -65,7 +65,7 @@ writes SQL; `--plan` reports what it would do and writes nothing.
 Every row it produces is checked by the only authority that matters: a test
 generates for each corpus schema at the default fifty rows, applies the result
 to a real Postgres, and fails if a single statement is rejected. It currently
-generates **1,114 statements across the nine schemas and Postgres accepts every
+generates **1,190 statements across the nine schemas and Postgres accepts every
 one**. The gate is zero, not a percentage — the whole thesis is that the
 database adjudicates, so one row it refuses is a failure rather than a figure
 to be pleased with.

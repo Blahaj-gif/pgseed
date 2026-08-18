@@ -22,6 +22,7 @@ pub mod emit;
 pub mod filter;
 pub mod generate;
 pub mod graph;
+pub mod indexes;
 pub mod introspect;
 pub mod schema;
 pub mod volume;

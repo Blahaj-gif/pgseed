@@ -155,9 +155,21 @@ fn covering_key<'t>(table: &'t Table, column: &str) -> Option<&'t ForeignKey> {
 /// and `overlapping_keys` refuses rather than hoping.
 pub fn variations(table: &Table) -> BTreeMap<String, usize> {
     let mut out: BTreeMap<String, usize> = BTreeMap::new();
+
+    // Single-column keys first, and they overwrite rather than defer. A
+    // column that must be unique on its own has to change every row, and a
+    // composite key that got there first would have claimed it as a slow
+    // digit — `uid` changing once every thirty-six rows satisfies the
+    // composite key it was picked for and duplicates on its own.
+    //
+    // Reading unique indexes is what exposed this: it multiplies how many
+    // keys a table has, so the order they are seen in started to matter.
+    for key in table.unique_keys.iter().filter(|k| k.columns.len() == 1) {
+        out.insert(key.columns[0].clone(), 1);
+    }
+
     for key in &table.unique_keys {
         if key.columns.len() == 1 {
-            out.entry(key.columns[0].clone()).or_insert(1);
             continue;
         }
         // Columns drawn from a parent are skipped: their values are whatever
@@ -369,6 +381,23 @@ mod tests {
         t.unique_keys.push(unique("by_state", &["state"]));
         t.unique_keys.push(unique("by_flag", &["flag"]));
         assert_eq!(capacity(&t, &BTreeMap::new()), Some(2));
+    }
+
+    #[test]
+    fn a_column_unique_on_its_own_changes_every_row_whatever_else_names_it() {
+        // GitLab's oauth_applications: a unique index on `uid`, and `uid` also
+        // sits in a composite key. The composite one was reached first and
+        // claimed it as a slow digit, so `uid` duplicated on its own.
+        let mut t = table(
+            "oauth_applications",
+            vec![
+                col("uid", ColumnType::Text { max_length: None }),
+                col("flag", ColumnType::Boolean),
+            ],
+        );
+        t.unique_keys.push(unique("by_flag_and_uid", &["flag", "uid"]));
+        t.unique_keys.push(unique("by_uid", &["uid"]));
+        assert_eq!(variations(&t).get("uid"), Some(&1), "uid must change every row");
     }
 
     #[test]
