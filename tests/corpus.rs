@@ -49,9 +49,35 @@ fn statements(sql: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut in_body = false;
+    let mut in_comment = false;
 
     for line in sql.lines() {
         let trimmed = line.trim();
+
+        // A `/* ... */` banner at the start of a line, which is where files
+        // put their licence and their explanations. Hasura's opens with one,
+        // and gluing it to the first statement made that statement begin with
+        // `/*` rather than `CREATE` — so it failed the head filter, the
+        // function it defined was never created, and six of Hasura's eight
+        // tables failed with it.
+        //
+        // Only at the start of a line, and only outside a function body. A
+        // stripper that tracked quotes across the whole file desynchronised on
+        // the apostrophe in an ordinary `-- don't` comment and took PostgREST
+        // from 73 tables to none, which is a worse bug than the one it fixed.
+        if in_comment {
+            if trimmed.contains("*/") {
+                in_comment = false;
+            }
+            continue;
+        }
+        if !in_body && trimmed.starts_with("/*") {
+            if !trimmed.contains("*/") {
+                in_comment = true;
+            }
+            continue;
+        }
+
         if trimmed.starts_with("--") || trimmed.is_empty() {
             continue;
         }
@@ -308,7 +334,7 @@ fn reach_against_real_schemas() {
     // Name, and the number of constraints its replay is known to lose.
     for (name, max_lost) in [
         ("powerdns", 0),
-        ("hasura", 2),
+        ("hasura", 0),
         ("kong", 0),
         ("harbor", 0),
         ("temporal", 0),

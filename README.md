@@ -42,7 +42,7 @@ hold rows** — two facts a person can answer instantly and a tool cannot.
 | schema | tables | fillable | reach |
 |---|---:|---:|---:|
 | PowerDNS | 7 | 7 | 100% |
-| Hasura | 2 | 1 | 50% |
+| Hasura | 8 | 3 | 38% |
 | Kong | 9 | 8 | 89% |
 | Harbor | 21 | 21 | 100% |
 | Temporal | 37 | 36 | 97% |
@@ -50,7 +50,7 @@ hold rows** — two facts a person can answer instantly and a tool cannot.
 | Synapse | 134 | 127 | 95% |
 | Discourse | 351 | 327 | 93% |
 | GitLab | 956 | 241 | 25% |
-| **total** | **1,590** | **840** | **53%** |
+| **total** | **1,596** | **842** | **53%** |
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. The corpus is deliberately not written here — a
