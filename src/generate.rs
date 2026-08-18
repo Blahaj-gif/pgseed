@@ -22,12 +22,17 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::checks::{self, Meaning};
+use crate::nouns::{self, Noun};
 use crate::schema::{Column, ColumnType, Table, TableId};
 
 /// What a column's own constraints require of every value written to it.
 #[derive(Debug, Clone, Default)]
 pub struct Bounds {
     pub max_length: Option<i32>,
+    /// A floor on the length, from `char_length(col) >= N`. Satisfied by
+    /// padding, which is provable in a way that hoping the word list is long
+    /// enough is not.
+    pub min_length: Option<i32>,
     pub exact_bytes: Option<i32>,
     pub min: Option<i64>,
     pub must_be_null: bool,
@@ -57,6 +62,12 @@ pub fn bounds_for(table: &Table) -> BTreeMap<String, Bounds> {
                 // The tightest limit wins: two constraints on one column both
                 // have to hold.
                 entry.max_length = Some(entry.max_length.map_or(max, |m: i32| m.min(max)));
+            }
+            Meaning::MinLength { column, min } => {
+                // The loosest floor loses: two floors on one column both have
+                // to hold, so the higher one is the binding one.
+                let entry = out.entry(column).or_default();
+                entry.min_length = Some(entry.min_length.map_or(min, |m: i32| m.max(min)));
             }
             Meaning::ByteLength { column, exact } => {
                 out.entry(column).or_default().exact_bytes = Some(exact);
@@ -208,12 +219,33 @@ fn stream(seed: u64, table: &TableId, column: &str, row: usize) -> ChaCha8Rng {
     ChaCha8Rng::seed_from_u64(key)
 }
 
-/// Words to build text from. Deliberately dull: this generates *valid* data,
-/// not realistic data, and pretending otherwise invites somebody to demo with
-/// it.
+/// Words for a text column whose name says nothing about what it holds.
+///
+/// This used to be the NATO alphabet, on the reasoning that a tool producing
+/// *valid* data should not dress up as one producing realistic data. The
+/// reasoning survives — `nouns` is a closed set and a column outside it gets
+/// no claim made about it — but the words do not have to be nonsense to make
+/// the point. These are ordinary lowercase nouns of the kind a `value` or
+/// `data` column plausibly holds, and every one of them is ASCII and
+/// lowercase, which `bounds.lowercase` and the byte-limit reasoning in
+/// `checks` both depend on.
 const WORDS: [&str; 16] = [
-    "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet",
-    "kilo", "lima", "mike", "november", "oscar", "papa",
+    "invoice",
+    "shipment",
+    "ledger",
+    "manifest",
+    "receipt",
+    "transfer",
+    "dispatch",
+    "batch",
+    "carrier",
+    "warehouse",
+    "payload",
+    "refund",
+    "settlement",
+    "consignment",
+    "allocation",
+    "reconciliation",
 ];
 
 /// A date `n` days after 2020-01-01, as `YYYY-MM-DD`.
@@ -307,7 +339,11 @@ pub fn value(
     // single-column key, every Nth row for a digit of a composite one. The
     // index it steps by is the row divided by it.
     let step = variation.map(|stride| row / stride.max(1));
-    render(&mut rng, &column.type_, row, step, bounds)
+    // What the column is called, where that says something exact. Worked out
+    // once here rather than inside `render`, which recurses through domains
+    // and arrays and would otherwise re-derive it at every level.
+    let noun = nouns::of(&column.name);
+    render(&mut rng, &column.type_, row, step, bounds, noun)
 }
 
 fn render(
@@ -316,6 +352,7 @@ fn render(
     row: usize,
     step: Option<usize>,
     bounds: &Bounds,
+    noun: Option<Noun>,
 ) -> Literal {
     let unique = step.is_some();
     let step = step.unwrap_or(row);
@@ -396,14 +433,37 @@ fn render(
                 (None, Some(b)) => Some(b),
                 (None, None) => None,
             };
+            // The column's name first, where it named something exactly. The
+            // noun either produces a value that fits inside `limit` and is
+            // distinct for its step, or declines — and declining falls through
+            // to the path below, which is built for columns with no room.
+            //
+            // `row` rather than the step is what a *non*-unique noun is drawn
+            // from, so that every person-shaped column in one row describes
+            // the same person: `first_name`, `last_name` and `email` all read
+            // the same odometer position and agree. A unique column keeps the
+            // step, because being distinct comes first, and a composite key
+            // whose stride moves it off the row is the one case where the
+            // agreement is given up rather than the distinctness.
+            let named = noun.and_then(|noun| {
+                nouns::render(
+                    noun,
+                    rng,
+                    step_of(unique, step),
+                    row,
+                    limit.map(|l| l.max(0) as usize),
+                )
+            });
+
             let word = WORDS[rng.gen_range(0..WORDS.len())];
-            let mut text = match (unique, limit) {
+            let mut text = match (named, unique, limit) {
+                (Some(named), _, _) => named,
                 // The row index has to survive the length limit, and appending
                 // it does not: `varchar(4)` cut "juliet-37" down to "juli" on
                 // every row, so a unique column produced the same four
                 // characters over and over. The index goes in first and the
                 // word fills whatever room is left over.
-                (true, Some(limit)) => {
+                (None, true, Some(limit)) => {
                     let limit = limit.max(1) as usize;
                     let tag = base36(step);
                     let room = limit.saturating_sub(tag.chars().count());
@@ -414,9 +474,21 @@ fn render(
                     };
                     format!("{head}{tail}")
                 }
-                (true, None) => format!("{word}-{step}"),
-                (false, _) => word.to_string(),
+                (None, true, None) => format!("{word}-{step}"),
+                (None, false, _) => word.to_string(),
             };
+
+            // A floor on the length, padded up to. The filler is a hyphen
+            // because no value this generates ends in one, which is what makes
+            // padding safe on a unique column: two values that differed before
+            // padding still differ after it, since neither can be the other
+            // with hyphens added.
+            if let Some(min) = bounds.min_length {
+                let short = (min.max(0) as usize).saturating_sub(text.chars().count());
+                if short > 0 {
+                    text.push_str(&"-".repeat(short));
+                }
+            }
             if let Some(limit) = limit {
                 let limit = limit.max(1) as usize;
                 if text.chars().count() > limit {
@@ -590,7 +662,9 @@ fn render(
             }
         }
 
-        ColumnType::Domain { inner, .. } => render(rng, inner, row, step_of(unique, step), bounds),
+        ColumnType::Domain { inner, .. } => {
+            render(rng, inner, row, step_of(unique, step), bounds, noun)
+        }
 
         // One element is enough to be a valid array, and a longer one only
         // makes a failure harder to read.
@@ -601,7 +675,7 @@ fn render(
             // nine real schemas. Where the element type has no unambiguous
             // name to write, the array goes out uncast as before rather than
             // naming a type that might belong to another schema.
-            let Literal(inner) = render(rng, of, row, step_of(unique, step), bounds);
+            let Literal(inner) = render(rng, of, row, step_of(unique, step), bounds, noun);
             match of.sql_name() {
                 Some(name) => Literal(format!("ARRAY[{inner}]::{name}[]")),
                 None => Literal(format!("ARRAY[{inner}]")),
@@ -713,6 +787,28 @@ mod tests {
         let a = value(1, &table_id(), &c, 0, &Bounds::default(), None);
         let b = value(2, &table_id(), &c, 0, &Bounds::default(), None);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_floor_on_the_length_is_padded_up_to_without_losing_distinctness() {
+        // Padding a unique column is where this could go wrong quietly: two
+        // values that differed before the filler was added must still differ
+        // after it.
+        let c = column("code", ColumnType::Text { max_length: None });
+        let bounds = Bounds {
+            min_length: Some(24),
+            ..Default::default()
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for row in 0..500 {
+            let text = value(3, &table_id(), &c, row, &bounds, Some(1)).0;
+            let inner = text.trim_matches('\u{27}');
+            assert!(
+                inner.chars().count() >= 24,
+                "row {row} came out short: {text}"
+            );
+            assert!(seen.insert(text.clone()), "row {row} repeated: {text}");
+        }
     }
 
     #[test]

@@ -101,6 +101,29 @@ impl Verdict {
     }
 }
 
+/// The tightest ceiling on a text column's length, from its declaration and
+/// from every CHECK on the table, or `None` where nothing bounds it.
+fn ceiling_for(table: &Table, column: &crate::schema::Column) -> Option<i32> {
+    use crate::checks::Meaning;
+    let declared = match &column.type_ {
+        crate::schema::ColumnType::Text { max_length } => *max_length,
+        _ => None,
+    };
+    table
+        .checks
+        .iter()
+        .filter_map(|check| match crate::checks::interpret(&check.definition) {
+            Meaning::LengthLimit { column: c, max } | Meaning::ByteLimit { column: c, max }
+                if c == column.name =>
+            {
+                Some(max)
+            }
+            _ => None,
+        })
+        .chain(declared)
+        .min()
+}
+
 /// Reasons a table cannot be filled *on its own terms*, before anything about
 /// what it depends on is considered.
 fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
@@ -133,6 +156,14 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
             // Every value this generates is at least one character long, so a
             // column that must not be empty already is not.
             Meaning::NonEmpty { column } => table.column(&column).is_some(),
+            // A floor on the length is met by padding — but only where there
+            // is room to pad into. A column declared `varchar(8)` and obliged
+            // to hold twelve characters has no satisfying row, and reading
+            // both rules and then writing eight characters anyway is exactly
+            // the silent-pass this project exists to not do.
+            Meaning::MinLength { column, min } => table
+                .column(&column)
+                .is_some_and(|c| ceiling_for(table, c).map_or(true, |max| max >= min)),
             // One of a listed set of values, which is an enum written out
             // longhand and satisfied the same way.
             Meaning::ValueSet { column, values } => {

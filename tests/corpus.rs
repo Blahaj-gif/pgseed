@@ -123,7 +123,6 @@ impl Coverage {
                 out.check_constraint = true;
                 out.partitioned |= check.definition.starts_with("PARTITION BY");
                 out.trigger |= check.definition.starts_with("TRIGGER");
-                out.unique_index |= check.name.ends_with(":partitions") && false;
             }
             out.unique_index |= table
                 .unique_keys

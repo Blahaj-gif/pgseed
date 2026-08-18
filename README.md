@@ -60,8 +60,8 @@ hold rows** — two facts a person can answer instantly and a tool cannot.
 | Lago | 138 | 115 | 83% |
 | Sourcegraph *(frontend)* | 180 | 75 | 42% |
 | Discourse | 351 | 324 | 92% |
-| GitLab | 1,057 | 414 | 39% |
-| **total** | **2,355** | **1,470** | **62%** |
+| GitLab | 1,057 | 420 | 40% |
+| **total** | **2,353** | **1,492** | **63%** |
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. Three are *replayed* migration directories rather
@@ -79,7 +79,7 @@ writes SQL; `--plan` reports what it would do and writes nothing.
 Every row it produces is checked by the only authority that matters: a test
 generates for each corpus schema at the default fifty rows, applies the result
 to a real Postgres, and fails if a single statement is rejected. It currently
-generates **1,940 statements across the twenty schemas and Postgres accepts
+generates **1,906 statements across the twenty schemas and Postgres accepts
 every one** — with every one of their 456 triggers installed, and their 106
 partitioned tables read. The gate is zero, not a percentage — the whole thesis is that the
 database adjudicates, so one row it refuses is a failure rather than a figure
@@ -131,6 +131,7 @@ looking similar.
 | shape | how it is satisfied |
 |---|---|
 | `char_length(col) <= N` | what `varchar(N)` already means |
+| `char_length(col) >= N`, `> N` | padded up to, where the column has room — and refused where it has not |
 | `col IS NOT NULL` | a column this never writes NULL into |
 | `octet_length(col) = N` / `<= N` | a fixed width, or a ceiling |
 | `col > N`, `col >= N` | a floor on the generated number |
@@ -150,6 +151,56 @@ Exit codes follow: `0` everything fillable, `1` something refused, `2` the
 schema could not be read — so it composes in a script without anybody parsing
 prose.
 
+## The data itself
+
+Every text column used to be filled from the NATO alphabet — `alpha`, `bravo`,
+`charlie` — on the argument that a tool producing *valid* data should not dress
+up as one producing realistic data. That argument is right about correctness
+and useless in front of a screen. So column names are now read the same way
+CHECK constraints are: **a closed set of exact shapes**, matched on the whole
+name, its last two segments, or its last one. Nothing is guessed from a
+substring, because `description_id` is not a description.
+
+```sql
+INSERT INTO "public"."users" ("email", "username", "first_name", "last_name", "display_name", "timezone", "last_login_ip", "api_token", "state") VALUES
+  ('ada.achebe@example.com',   'ada.achebe',   'Ada',   'Achebe',  'Ada Achebe',   'Europe/Berlin',  '192.0.2.160',   '333122c6…', 'suspended'),
+  ('amara.adeyemi@example.org','amara.adeyemi','Amara', 'Adeyemi', 'Amara Adeyemi','America/Chicago','192.0.2.21',    'ce8327aa…', 'suspended');
+```
+
+Which names to cover was **counted, not remembered**: `tests/columns.rs` reads
+every text column in the twenty corpus schemas — 5,509 of them — and ranks the
+names. `name` appears 666 times, `id` 463, `type` 290, `key` 230, `path` 217,
+`url` 172, `description` 163, `email` 78. That ranking is the list, and the same
+test reports what the list still misses: **4,216 of the 5,509 land on a noun,
+77%**, and the largest gaps left are `value` at 60 columns and `code` at 38 —
+both genuinely ambiguous, which is why they are still gaps.
+
+Three properties hold, and each is a test rather than an intention:
+
+- **Columns in one row describe the same person.** `first_name`, `last_name`,
+  `email` and `display_name` are four readings of one number, so they agree by
+  construction rather than by bookkeeping. A row saying *Ada* and
+  `amara.adeyemi@` is worse than one saying `bravo` twice, because it looks
+  right and is not.
+- **A unique column is still provably distinct.** The word lists are read as an
+  odometer and a counter is appended once they are exhausted, so two rows
+  cannot collide — distinctness that can be shown rather than distinctness that
+  is very likely. Where distinctness and agreement conflict, distinctness wins
+  and the agreement is the thing given up.
+- **Nothing generated can reach anybody.** Addresses are on the RFC 2606
+  reserved domains, telephone numbers in the 555-01xx block reserved for
+  fiction, and IP addresses in the RFC 5737 documentation ranges. Generated
+  data ends up in staging systems, and staging systems send mail.
+
+A column whose name says nothing exact — `value`, `data`, `payload` — still
+gets an ordinary word rather than a claim. And a value that will not fit the
+column is **declined rather than truncated**: `varchar(8)` gets the old
+tight-fitting generator, not `ada.love`.
+
+What this does *not* do is make a row coherent beyond that: a `city` and a
+`country` in one row are drawn independently and may not belong together. The
+person columns are the exception, and they are the exception on purpose.
+
 ## What it handles today
 
 | | |
@@ -158,6 +209,7 @@ prose.
 | FK cycles | broken through a nullable key, or by deferring a deferrable one |
 | Unbreakable cycles | refused, naming the constraint that would have to change |
 | Composite keys | referencing and referenced columns kept in declared order |
+| Column names | 40-odd shapes — email, person, path, URL, host, MIME type, digest, slug, currency, locale, timezone — matched exactly, never by substring |
 | Types | integers, numerics with precision, text with declared length, uuid, dates, timestamps, json, bytea, enums with their labels, domains, arrays |
 | Generated & identity columns | left out of the insert entirely, not defaulted |
 | Refusal contagion | a table whose required key points at a refused, or unread, table is refused too, all the way down |

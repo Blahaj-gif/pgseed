@@ -79,6 +79,13 @@ pub enum Meaning {
     /// `cardinality(col) <= N`. Every array this generates holds one element,
     /// so any limit of 1 or more is already met.
     CardinalityLimit { column: String, max: i32 },
+    /// `char_length(col) >= N`, or `> N`, or the same with `length`. A floor
+    /// rather than a ceiling, and satisfied by padding a value that falls
+    /// short. Eight of these across the corpus, which is few — but a schema
+    /// somebody writes by hand rather than generates is full of
+    /// `char_length(title) > 0`, and that is the reader this refuses to serve
+    /// if it does not read them.
+    MinLength { column: String, min: i32 },
     /// `col <> ''`. Not "different from some value" — different from the
     /// *empty string* specifically, which every value this generates already
     /// is. The commonest unrecognised shape across eighteen schemas, at 20.
@@ -379,6 +386,39 @@ pub fn interpret(definition: &str) -> Meaning {
         return Meaning::Unknown;
     }
 
+    // The same three measuring functions the other way up. `>= N` is a floor
+    // of N and `> N` a floor of N + 1, and a floor is satisfiable by padding
+    // where a ceiling is satisfiable by truncating.
+    //
+    // Bounded above at 4096 because the point of reading it is to satisfy it,
+    // and a column obliged to hold a megabyte is one this would rather refuse
+    // than fill.
+    for (operator, offset) in [(">=", 0i64), (">", 1)] {
+        let Some((left, right)) = split_top(expression, operator) else {
+            continue;
+        };
+        // `>=` also splits on `>`, so the two-character form has to be tried
+        // first and the one-character form must not match its leftovers.
+        if operator == ">" && (left.ends_with(['<', '>', '!']) || right.starts_with('=')) {
+            continue;
+        }
+        let Some(bound) = integer_bound(right) else {
+            continue;
+        };
+        for call in ["char_length", "length"] {
+            if let Some(column) = call_argument(left, call).and_then(column_cast) {
+                let min = bound + offset;
+                if (0..=4096).contains(&min) {
+                    return Meaning::MinLength {
+                        column,
+                        min: min as i32,
+                    };
+                }
+                return Meaning::Unknown;
+            }
+        }
+    }
+
     // `num_nonnulls(a, b, ...) = 1` — exactly one of them holds a value.
     //
     // Only `= 1`. `<= 1` is satisfied by nulling all of them and `> 0` by
@@ -597,8 +637,9 @@ mod tests {
         // of them is approximated.
         for definition in [
             "CHECK (((total > 0) OR ((status)::text = 'void'::text)))",
-            "CHECK ((char_length(name) >= 3))",
             "CHECK ((char_length(a) <= char_length(b)))",
+            // A floor is read; a floor against another column is not.
+            "CHECK ((char_length(a) >= char_length(b)))",
             "CHECK ((a IS NOT NULL) AND (b IS NOT NULL))",
             "CHECK ((starts_with(path, 'x'::text)))",
             "CHECK (((name)::text ~ '^[a-z]+$'::text))",
@@ -649,6 +690,46 @@ mod tests {
         );
         assert_eq!(
             interpret("CHECK ((status <> ANY (ARRAY['a'::text])))"),
+            Meaning::Unknown
+        );
+    }
+
+    #[test]
+    fn a_floor_on_the_length_is_read_the_same_way_as_a_ceiling() {
+        assert_eq!(
+            interpret("CHECK ((char_length(title) > 0))"),
+            Meaning::MinLength {
+                column: "title".into(),
+                min: 1
+            }
+        );
+        // `>= 3` is a floor of three; `> 3` is a floor of four. Reading them
+        // as the same number is off by one on every row.
+        assert_eq!(
+            interpret("CHECK ((char_length(name) >= 3))"),
+            Meaning::MinLength {
+                column: "name".into(),
+                min: 3
+            }
+        );
+        assert_eq!(
+            interpret("CHECK ((length(code) > 3))"),
+            Meaning::MinLength {
+                column: "code".into(),
+                min: 4
+            }
+        );
+        assert_eq!(
+            interpret("CHECK ((char_length((slug)::text) >= 2))"),
+            Meaning::MinLength {
+                column: "slug".into(),
+                min: 2
+            }
+        );
+        // A floor nobody could want filled is refused rather than honoured
+        // with four kilobytes of padding.
+        assert_eq!(
+            interpret("CHECK ((char_length(blob) >= 100000))"),
             Meaning::Unknown
         );
     }
