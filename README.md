@@ -46,11 +46,11 @@ hold rows** — two facts a person can answer instantly and a tool cannot.
 | Kong | 9 | 8 | 89% |
 | Harbor | 21 | 21 | 100% |
 | Temporal | 37 | 36 | 97% |
-| PostgREST *(test fixtures — deliberately awkward)* | 73 | 72 | 99% |
+| PostgREST *(test fixtures — deliberately awkward)* | 132 | 127 | 96% |
 | Synapse | 134 | 127 | 95% |
 | Discourse | 351 | 327 | 93% |
 | GitLab | 956 | 241 | 25% |
-| **total** | **1,596** | **842** | **53%** |
+| **total** | **1,655** | **897** | **54%** |
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. The corpus is deliberately not written here — a
