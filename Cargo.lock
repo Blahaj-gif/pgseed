@@ -1260,6 +1260,7 @@ dependencies = [
  "postgresql_embedded",
  "rand 0.8.7",
  "rand_chacha 0.3.1",
+ "serde_json",
 ]
 
 [[package]]

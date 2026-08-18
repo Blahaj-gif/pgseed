@@ -37,126 +37,117 @@
 //! one has flattered this project twice already, and saying where it still
 //! does is the only honest way to quote its number.
 
+mod corpus_shared;
 mod harness;
+
+use corpus_shared::{schemas_in, statements};
 
 use std::path::Path;
 
 use harness::Db;
 
-/// Split a dump into statements on semicolons at end of line, skipping the
-/// parts of a dump that are not DDL. Crude, and sufficient: a statement this
-/// mis-splits simply fails and is skipped, which costs one table out of
-/// hundreds rather than corrupting the measurement.
-/// Schemas a dump puts its tables in, so they can be created first.
-fn schemas_in(sql: &str) -> Vec<String> {
-    let mut schemas: std::collections::BTreeSet<String> = ["public".to_string()].into();
-    for line in sql.lines() {
-        for marker in ["CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "] {
-            if let Some(rest) = line.trim_start().strip_prefix(marker) {
-                if let Some((qualifier, _)) = rest.split_once('.') {
-                    let name = qualifier.trim().trim_matches('"');
-                    if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                        schemas.insert(name.to_string());
-                    }
+/// Which constructs a schema actually exercises.
+///
+/// The corpus was a list, and a list says only how many schemas there are. A
+/// construct with one schema behind it is one schema away from being untested,
+/// and one with none is being tested only by DDL this project wrote — which is
+/// the mistake the corpus exists to avoid. Counting them makes thin coverage
+/// visible, so schemas get added to fill holes rather than to reach a round
+/// number.
+#[derive(Debug, Default, Clone, Copy)]
+struct Coverage {
+    composite_key: bool,
+    foreign_key_cycle: bool,
+    self_reference: bool,
+    deferrable_key: bool,
+    partitioned: bool,
+    domain_type: bool,
+    enum_type: bool,
+    array_column: bool,
+    json_column: bool,
+    generated_column: bool,
+    unique_index: bool,
+    trigger: bool,
+    check_constraint: bool,
+}
+
+impl Coverage {
+    const NAMES: [&'static str; 13] = [
+        "composite key",
+        "foreign key cycle",
+        "self reference",
+        "deferrable key",
+        "partitioned table",
+        "domain type",
+        "enum type",
+        "array column",
+        "json column",
+        "generated column",
+        "unique index",
+        "trigger",
+        "check constraint",
+    ];
+
+    fn flags(&self) -> [bool; 13] {
+        [
+            self.composite_key,
+            self.foreign_key_cycle,
+            self.self_reference,
+            self.deferrable_key,
+            self.partitioned,
+            self.domain_type,
+            self.enum_type,
+            self.array_column,
+            self.json_column,
+            self.generated_column,
+            self.unique_index,
+            self.trigger,
+            self.check_constraint,
+        ]
+    }
+
+    fn of(schema: &pgsow::schema::Schema, order: &pgsow::graph::Order) -> Coverage {
+        use pgsow::schema::ColumnType;
+        let mut out = Coverage {
+            foreign_key_cycle: order.cycles.iter().any(|c| c.tables.len() > 1),
+            ..Default::default()
+        };
+        for table in schema.tables.values() {
+            out.composite_key |= table.unique_keys.iter().any(|k| k.columns.len() > 1);
+            out.self_reference |= table
+                .foreign_keys
+                .iter()
+                .any(|fk| fk.references == table.id);
+            out.deferrable_key |= table.foreign_keys.iter().any(|fk| fk.deferrable);
+            for check in &table.checks {
+                out.check_constraint = true;
+                out.partitioned |= check.definition.starts_with("PARTITION BY");
+                out.trigger |= check.definition.starts_with("TRIGGER");
+                out.unique_index |= check.name.ends_with(":partitions") && false;
+            }
+            out.unique_index |= table
+                .unique_keys
+                .iter()
+                .any(|k| k.name.starts_with("index_") || k.name.starts_with("idx"));
+            for column in &table.columns {
+                out.generated_column |= column.is_generated;
+                match &column.type_ {
+                    ColumnType::Domain { .. } => out.domain_type = true,
+                    ColumnType::Enum { .. } => out.enum_type = true,
+                    ColumnType::Array { .. } => out.array_column = true,
+                    ColumnType::Json { .. } => out.json_column = true,
+                    _ => {}
                 }
             }
         }
+        out
     }
-    schemas.into_iter().collect()
 }
 
-/// Every dollar-quote tag on a line, in order: `$$`, `$_$`, `$function$`.
-///
-/// A tag is a `$`, then letters, digits or underscores not starting with a
-/// digit, then another `$`. Anything else that happens to contain a dollar —
-/// `$1` in a function body, a price in a string — is not one.
-fn dollar_tags(line: &str) -> Vec<&str> {
-    let bytes = line.as_bytes();
-    let mut out = Vec::new();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] != b'$' {
-            index += 1;
-            continue;
-        }
-        let mut end = index + 1;
-        while end < bytes.len() && (bytes[end] == b'_' || bytes[end].is_ascii_alphanumeric()) {
-            end += 1;
-        }
-        let is_tag = end < bytes.len() && bytes[end] == b'$' && !bytes[index + 1].is_ascii_digit();
-        if is_tag {
-            out.push(&line[index..=end]);
-            index = end + 1;
-        } else {
-            index += 1;
-        }
-    }
-    out
-}
-
-fn statements(sql: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut in_body = false;
-    let mut in_comment = false;
-    let mut open_tag: Option<String> = None;
-
-    for line in sql.lines() {
-        let trimmed = line.trim();
-
-        // A `/* ... */` banner at the start of a line, which is where files
-        // put their licence and their explanations. Hasura's opens with one,
-        // and gluing it to the first statement made that statement begin with
-        // `/*` rather than `CREATE` — so it failed the head filter, the
-        // function it defined was never created, and six of Hasura's eight
-        // tables failed with it.
-        //
-        // Only at the start of a line, and only outside a function body. A
-        // stripper that tracked quotes across the whole file desynchronised on
-        // the apostrophe in an ordinary `-- don't` comment and took PostgREST
-        // from 73 tables to none, which is a worse bug than the one it fixed.
-        if in_comment {
-            if trimmed.contains("*/") {
-                in_comment = false;
-            }
-            continue;
-        }
-        if !in_body && trimmed.starts_with("/*") {
-            if !trimmed.contains("*/") {
-                in_comment = true;
-            }
-            continue;
-        }
-
-        if trimmed.starts_with("--") || trimmed.is_empty() {
-            continue;
-        }
-        // Function bodies contain semicolons that do not end a statement, and
-        // they are delimited by a *tag*: `$$`, but also `$_$` or `$function$`.
-        // Testing for `$$` alone never saw GitLab's `$_$` bodies, so every
-        // semicolon inside one cut the statement in half and Postgres reported
-        // an unterminated dollar-quoted string.
-        for tag in dollar_tags(trimmed) {
-            match &open_tag {
-                None => open_tag = Some(tag.to_string()),
-                Some(current) if current == tag => open_tag = None,
-                Some(_) => {}
-            }
-        }
-        in_body = open_tag.is_some();
-        current.push_str(line);
-        current.push('\n');
-        if !in_body && trimmed.ends_with(';') {
-            out.push(std::mem::take(&mut current));
-        }
-    }
-    out
-}
-
-fn measure(name: &str, path: &Path, max_lost: usize) {
+fn measure(name: &str, path: &Path, max_lost: usize) -> Coverage {
     let Ok(sql) = std::fs::read_to_string(path) else {
         eprintln!("  {name}: not fetched, skipping");
-        return;
+        return Coverage::default();
     };
 
     let db = Db::start();
@@ -328,6 +319,8 @@ fn measure(name: &str, path: &Path, max_lost: usize) {
         seen.insert(id.clone());
     }
 
+    let coverage = Coverage::of(&schema, &order);
+
     // And now the test the plan called the whole project: generate rows for
     // this schema and make the database judge them.
     //
@@ -418,46 +411,77 @@ fn measure(name: &str, path: &Path, max_lost: usize) {
 {first_failures:#?}",
         statements.len()
     );
+
+    coverage
 }
 
 #[test]
 fn reach_against_real_schemas() {
     println!("\nreach on schemas this project did not write:");
-    // Name, and the number of constraints its replay is known to lose.
-    for (name, max_lost) in [
-        ("powerdns", 0),
-        ("hasura", 0),
-        ("kong", 0),
-        ("harbor", 0),
-        ("temporal", 0),
-        ("postgrest", 2),
-        ("synapse", 0),
-        ("discourse", 3),
-        ("gitlab", 2),
-        // Six added after the harness was repaired rather than before it, so
-        // that a new denominator and a newly-honest measurement did not land
-        // together and make each other hard to read.
-        ("lago", 0),
-        ("sourcegraph", 0),
-        ("sourcegraph_codeintel", 0),
-        ("sourcegraph_insights", 0),
-        ("plausible", 1),
-        ("hexpm", 2),
-        // Replayed migration directories rather than a snapshot of a finished
-        // schema. A ceiling above zero is expected here and is measured: a
-        // replay only reaches the real shape if every migration applies.
-        ("mattermost", 3),
-        ("vaultwarden", 0),
-        ("kratos", 0),
-        // Configured, and skipped cleanly until it is fetched — the listing
-        // API allows sixty calls an hour without a token and they were spent
-        // finding these.
-        ("hydra", 99),
-    ] {
-        measure(
-            name,
-            &Path::new("tests/corpus").join(format!("{name}.sql")),
-            max_lost,
+    let mut covered = [0usize; 13];
+    let mut schemas = 0usize;
+    for source in corpus_shared::sources() {
+        let coverage = measure(
+            &source.name,
+            &Path::new("tests/corpus").join(&source.file),
+            source.max_lost_constraints,
+        );
+        schemas += 1;
+        for (total, present) in covered.iter_mut().zip(coverage.flags()) {
+            *total += usize::from(present);
+        }
+    }
+
+    println!(
+        "
+  what {schemas} real schemas exercise, and how thinly:"
+    );
+    for (construct, count) in Coverage::NAMES.iter().zip(covered) {
+        let thin = if count == 0 {
+            "  <- ABSENT: tested only by DDL written here"
+        } else if count == 1 {
+            "  <- thin: one schema away from untested"
+        } else {
+            ""
+        };
+        println!("    {construct:<20} {count:>3}{thin}");
+    }
+
+    // Constructs no real schema exercises, admitted in writing.
+    //
+    // A construct with none behind it is tested only against DDL written here,
+    // which is the mistake this corpus exists to prevent — so each one is
+    // named, with why it is still absent. A construct that becomes absent
+    // without being on this list fails the test.
+    const KNOWN_ABSENT: [(&str, &str); 1] = [(
+        "domain type",
+        "PostgREST defines seven domains and uses them in functions and casts,          never as the type of a table column. Nothing in twenty real schemas          has a domain-typed column, so `ColumnType::Domain` is exercised only          by the oracle tests.",
+    )];
+
+    let unexpected: Vec<&str> = Coverage::NAMES
+        .iter()
+        .zip(covered)
+        .filter(|(name, count)| {
+            *count == 0 && !KNOWN_ABSENT.iter().any(|(known, _)| known == *name)
+        })
+        .map(|(name, _)| *name)
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "no real schema exercises: {unexpected:?}. Either the corpus needs a 
+         schema that does, or this is claiming to handle something nothing 
+         has ever asked it to. If neither, say so in KNOWN_ABSENT."
+    );
+
+    // And a construct that stops being absent should stop being excused.
+    for (name, _) in KNOWN_ABSENT {
+        let index = Coverage::NAMES
+            .iter()
+            .position(|n| *n == name)
+            .expect("a real name");
+        assert_eq!(
+            covered[index], 0,
+            "{name} is covered now — take it out of KNOWN_ABSENT"
         );
     }
 }

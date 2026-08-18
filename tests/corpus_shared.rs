@@ -6,28 +6,37 @@
 
 #![allow(dead_code)]
 
-/// Every schema in the corpus, in the order they are measured.
-pub const NAMES: &[&str] = &[
-    "powerdns",
-    "hasura",
-    "kong",
-    "harbor",
-    "temporal",
-    "postgrest",
-    "synapse",
-    "discourse",
-    "gitlab",
-    "lago",
-    "sourcegraph",
-    "sourcegraph_codeintel",
-    "sourcegraph_insights",
-    "plausible",
-    "hexpm",
-    "mattermost",
-    "vaultwarden",
-    "kratos",
-    "hydra",
-];
+/// One schema of the corpus, as `sources.json` describes it.
+///
+/// Read from the manifest rather than repeated here. The manifest already had
+/// to carry the URL and the licence; carrying the ceiling too means a schema
+/// is described in exactly one place, and there is no second list to keep in
+/// step by hand.
+#[derive(Debug, Clone)]
+pub struct Source {
+    pub name: String,
+    pub file: String,
+    /// Constraints this schema's replay is known to lose. Measured.
+    pub max_lost_constraints: usize,
+}
+
+/// Every schema in the corpus, in the order the manifest lists them.
+pub fn sources() -> Vec<Source> {
+    let text = std::fs::read_to_string("tests/corpus/sources.json")
+        .expect("the corpus manifest is part of the repository");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).expect("the manifest is valid JSON");
+    parsed["schemas"]
+        .as_array()
+        .expect("the manifest lists schemas")
+        .iter()
+        .map(|entry| Source {
+            name: entry["name"].as_str().expect("a name").to_string(),
+            file: entry["file"].as_str().expect("a file").to_string(),
+            max_lost_constraints: entry["max_lost_constraints"].as_u64().unwrap_or(0) as usize,
+        })
+        .collect()
+}
 
 /// Schemas a dump puts its tables in, so they can be created first.
 pub fn schemas_in(sql: &str) -> Vec<String> {
@@ -74,64 +83,85 @@ pub fn dollar_tags(line: &str) -> Vec<&str> {
     }
     out
 }
-/// Split a dump into statements on semicolons at end of line. Crude, and
-/// sufficient: a statement this mis-splits simply fails and is skipped, which
-/// costs one table out of hundreds rather than corrupting the measurement.
+/// Split a dump into statements on semicolons.
+///
+/// On semicolons, not on lines that happen to end with one. listmonk writes
+/// `DROP TYPE IF EXISTS x CASCADE; CREATE TYPE x AS ENUM (...);` on a single
+/// line, and treating that as one statement meant its head was `DROP` — so the
+/// filter dropped it, the enum was never created, and every table using one
+/// failed. Twelve of its sixteen tables were missing for that reason.
+///
+/// Single quotes and dollar-quoted bodies are tracked, so a semicolon inside a
+/// string or a function body does not end anything.
 pub fn statements(sql: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
-    let mut in_body = false;
-    let mut in_comment = false;
     let mut open_tag: Option<String> = None;
+    let mut quoted = false;
+    let mut in_comment = false;
 
     for line in sql.lines() {
         let trimmed = line.trim();
 
         // A `/* ... */` banner at the start of a line, which is where files
-        // put their licence and their explanations. Hasura's opens with one,
-        // and gluing it to the first statement made that statement begin with
-        // `/*` rather than `CREATE` — so it failed the head filter, the
-        // function it defined was never created, and six of Hasura's eight
-        // tables failed with it.
-        //
-        // Only at the start of a line, and only outside a function body. A
-        // stripper that tracked quotes across the whole file desynchronised on
-        // the apostrophe in an ordinary `-- don't` comment and took PostgREST
-        // from 73 tables to none, which is a worse bug than the one it fixed.
+        // put their licence and their explanations. Only at the start, and
+        // only outside a body: a stripper that tracked quotes across the whole
+        // file desynchronised on the apostrophe in an ordinary `-- don't`.
         if in_comment {
             if trimmed.contains("*/") {
                 in_comment = false;
             }
             continue;
         }
-        if !in_body && trimmed.starts_with("/*") {
+        if open_tag.is_none() && !quoted && trimmed.starts_with("/*") {
             if !trimmed.contains("*/") {
                 in_comment = true;
             }
             continue;
         }
-
-        if trimmed.starts_with("--") || trimmed.is_empty() {
+        if open_tag.is_none() && !quoted && (trimmed.starts_with("--") || trimmed.is_empty()) {
             continue;
         }
-        // Function bodies contain semicolons that do not end a statement, and
-        // they are delimited by a *tag*: `$$`, but also `$_$` or `$function$`.
-        // Testing for `$$` alone never saw GitLab's `$_$` bodies, so every
-        // semicolon inside one cut the statement in half and Postgres reported
-        // an unterminated dollar-quoted string.
-        for tag in dollar_tags(trimmed) {
+
+        for tag in dollar_tags(line) {
             match &open_tag {
                 None => open_tag = Some(tag.to_string()),
-                Some(current) if current == tag => open_tag = None,
+                Some(open) if open == tag => open_tag = None,
                 Some(_) => {}
             }
         }
-        in_body = open_tag.is_some();
-        current.push_str(line);
-        current.push('\n');
-        if !in_body && trimmed.ends_with(';') {
-            out.push(std::mem::take(&mut current));
+
+        // Walk the line, ending a statement at each top-level semicolon.
+        let mut rest = line;
+        while open_tag.is_none() {
+            let Some(at) = next_semicolon(rest, &mut quoted) else {
+                break;
+            };
+            current.push_str(&rest[..=at]);
+            let statement = std::mem::take(&mut current);
+            if !statement.trim().is_empty() {
+                out.push(statement);
+            }
+            rest = &rest[at + 1..];
         }
+        current.push_str(rest);
+        current.push('\n');
+    }
+    if !current.trim().is_empty() {
+        out.push(current);
     }
     out
+}
+
+/// The next semicolon outside a string literal, advancing the quote state over
+/// everything it passes.
+fn next_semicolon(text: &str, quoted: &mut bool) -> Option<usize> {
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '\u{27}' => *quoted = !*quoted,
+            ';' if !*quoted => return Some(index),
+            _ => {}
+        }
+    }
+    None
 }

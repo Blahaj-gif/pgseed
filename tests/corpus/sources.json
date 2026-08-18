@@ -8,7 +8,8 @@
       "project": "PowerDNS/pdns",
       "licence": "GPL-2.0",
       "url": "https://raw.githubusercontent.com/PowerDNS/pdns/master/modules/gpgsqlbackend/schema.pgsql.sql",
-      "notes": "Tiny and old-fashioned. The small end of the range."
+      "notes": "Tiny and old-fashioned. The small end of the range.",
+      "max_lost_constraints": 0
     },
     {
       "name": "hasura",
@@ -16,7 +17,8 @@
       "project": "hasura/graphql-engine",
       "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/hasura/graphql-engine/master/server/src-rsr/initialise.sql",
-      "notes": "A catalog schema: jsonb-heavy."
+      "notes": "A catalog schema: jsonb-heavy.",
+      "max_lost_constraints": 0
     },
     {
       "name": "kong",
@@ -24,7 +26,8 @@
       "project": "Kong/kong",
       "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/Kong/kong/master/kong/db/migrations/core/000_base.lua",
-      "notes": "SQL embedded in a Lua migration; exercises the statement splitter on unusual surroundings."
+      "notes": "SQL embedded in a Lua migration; exercises the statement splitter on unusual surroundings.",
+      "max_lost_constraints": 0
     },
     {
       "name": "harbor",
@@ -32,7 +35,8 @@
       "project": "goharbor/harbor",
       "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/goharbor/harbor/main/make/migrations/postgresql/0001_initial_schema.up.sql",
-      "notes": "A hand-written initial migration rather than a generated dump."
+      "notes": "A hand-written initial migration rather than a generated dump.",
+      "max_lost_constraints": 0
     },
     {
       "name": "temporal",
@@ -40,7 +44,8 @@
       "project": "temporalio/temporal",
       "licence": "MIT",
       "url": "https://raw.githubusercontent.com/temporalio/temporal/main/schema/postgresql/v12/temporal/schema.sql",
-      "notes": "Bytea and composite primary keys throughout."
+      "notes": "Bytea and composite primary keys throughout.",
+      "max_lost_constraints": 0
     },
     {
       "name": "postgrest",
@@ -48,7 +53,8 @@
       "project": "PostgREST/postgrest",
       "licence": "MIT",
       "url": "https://raw.githubusercontent.com/PostgREST/postgrest/main/test/spec/fixtures/schema.sql",
-      "notes": "The most valuable one: a test fixture, so it is deliberately adversarial. Domains, composite types, odd identifiers, constraints written to be awkward."
+      "notes": "The most valuable one: a test fixture, so it is deliberately adversarial. Domains, composite types, odd identifiers, constraints written to be awkward.",
+      "max_lost_constraints": 2
     },
     {
       "name": "synapse",
@@ -56,7 +62,8 @@
       "project": "element-hq/synapse",
       "licence": "AGPL-3.0",
       "url": "https://raw.githubusercontent.com/element-hq/synapse/develop/synapse/storage/schema/main/full_schemas/72/full.sql.postgres",
-      "notes": "Matrix homeserver, ~134 tables, modest use of CHECK."
+      "notes": "Matrix homeserver, ~134 tables, modest use of CHECK.",
+      "max_lost_constraints": 0
     },
     {
       "name": "discourse",
@@ -64,7 +71,8 @@
       "project": "discourse/discourse",
       "licence": "GPL-2.0",
       "url": "https://raw.githubusercontent.com/discourse/discourse/main/db/structure.sql",
-      "notes": "A large Rails structure.sql."
+      "notes": "A large Rails structure.sql.",
+      "max_lost_constraints": 3
     },
     {
       "name": "gitlab",
@@ -72,7 +80,8 @@
       "project": "gitlabhq/gitlabhq",
       "licence": "MIT",
       "url": "https://raw.githubusercontent.com/gitlabhq/gitlabhq/master/db/structure.sql",
-      "notes": "~955 tables and 2,537 CHECK expressions. The schema that showed the refuse-every-CHECK policy was too blunt to be useful."
+      "notes": "~955 tables and 2,537 CHECK expressions. The schema that showed the refuse-every-CHECK policy was too blunt to be useful.",
+      "max_lost_constraints": 2
     },
     {
       "name": "lago",
@@ -80,7 +89,8 @@
       "project": "getlago/lago-api",
       "licence": "AGPL-3.0",
       "url": "https://raw.githubusercontent.com/getlago/lago-api/main/db/structure.sql",
-      "notes": "A modern Rails structure.sql \u2014 billing, a decade newer than Discourse's lineage."
+      "notes": "A modern Rails structure.sql \u2014 billing, a decade newer than Discourse's lineage.",
+      "max_lost_constraints": 0
     },
     {
       "name": "sourcegraph",
@@ -88,7 +98,8 @@
       "project": "sourcegraph/sourcegraph-public-snapshot",
       "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/sourcegraph/sourcegraph-public-snapshot/main/migrations/frontend/squashed.sql",
-      "notes": "A squashed Go migration set. Heavy on expression indexes, which is why it is here."
+      "notes": "A squashed Go migration set. Heavy on expression indexes, which is why it is here.",
+      "max_lost_constraints": 0
     },
     {
       "name": "sourcegraph_codeintel",
@@ -96,7 +107,8 @@
       "project": "sourcegraph/sourcegraph-public-snapshot",
       "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/sourcegraph/sourcegraph-public-snapshot/main/migrations/codeintel/squashed.sql",
-      "notes": "A second, genuinely separate database from the same product."
+      "notes": "A second, genuinely separate database from the same product.",
+      "max_lost_constraints": 0
     },
     {
       "name": "sourcegraph_insights",
@@ -104,7 +116,8 @@
       "project": "sourcegraph/sourcegraph-public-snapshot",
       "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/sourcegraph/sourcegraph-public-snapshot/main/migrations/codeinsights/squashed.sql",
-      "notes": "A third. Time-series shaped, unlike anything else in the corpus."
+      "notes": "A third. Time-series shaped, unlike anything else in the corpus.",
+      "max_lost_constraints": 0
     },
     {
       "name": "plausible",
@@ -112,7 +125,8 @@
       "project": "plausible/analytics",
       "licence": "AGPL-3.0",
       "url": "https://raw.githubusercontent.com/plausible/analytics/master/priv/repo/structure.sql",
-      "notes": "Ecto rather than Rails or hand-written; a different generator's habits."
+      "notes": "Ecto rather than Rails or hand-written; a different generator's habits.",
+      "max_lost_constraints": 1
     },
     {
       "name": "hexpm",
@@ -120,7 +134,8 @@
       "project": "hexpm/hexpm",
       "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/hexpm/hexpm/main/priv/repo/structure.sql",
-      "notes": "Ecto, and a package registry \u2014 versions, checksums, wide unique keys."
+      "notes": "Ecto, and a package registry \u2014 versions, checksums, wide unique keys.",
+      "max_lost_constraints": 2
     },
     {
       "name": "mattermost",
@@ -132,7 +147,8 @@
       "path": "server/channels/db/migrations/postgres",
       "suffix": ".up.sql",
       "url": "https://github.com/mattermost/mattermost/tree/master/server/channels/db/migrations/postgres",
-      "notes": "A replayed migration set rather than a snapshot \u2014 the first of its kind here, and the reason the fetcher can read a directory at all."
+      "notes": "A replayed migration set rather than a snapshot \u2014 the first of its kind here, and the reason the fetcher can read a directory at all.",
+      "max_lost_constraints": 3
     },
     {
       "name": "vaultwarden",
@@ -145,7 +161,8 @@
       "suffix": "up.sql",
       "nested": true,
       "url": "https://github.com/dani-garcia/vaultwarden/tree/main/migrations/postgresql",
-      "notes": "Diesel, one folder per migration. Small, and a Rust project's habits rather than a web framework's."
+      "notes": "Diesel, one folder per migration. Small, and a Rust project's habits rather than a web framework's.",
+      "max_lost_constraints": 0
     },
     {
       "name": "kratos",
@@ -157,7 +174,8 @@
       "path": "persistence/sql/migrations/sql",
       "suffix": ".postgres.up.sql",
       "url": "https://github.com/ory/kratos/tree/master/persistence/sql/migrations/sql",
-      "notes": "Identity management, written dialect-by-dialect \u2014 the Postgres files only."
+      "notes": "Identity management, written dialect-by-dialect \u2014 the Postgres files only.",
+      "max_lost_constraints": 0
     },
     {
       "name": "hydra",
@@ -174,7 +192,18 @@
         ".sqlite."
       ],
       "url": "https://github.com/ory/hydra/tree/master/persistence/sql/migrations",
-      "notes": "OAuth2 server. Written dialect by dialect, with the shared files named plainly \u2014 which is why the fetcher can exclude as well as match."
+      "notes": "OAuth2 server. Written dialect by dialect, with the shared files named plainly \u2014 which is why the fetcher can exclude as well as match.",
+      "max_lost_constraints": 12
+    },
+    {
+      "name": "listmonk",
+      "file": "listmonk.sql",
+      "project": "knadh/listmonk",
+      "licence": "AGPL-3.0",
+      "url": "https://raw.githubusercontent.com/knadh/listmonk/master/schema.sql",
+      "notes": "A hand-written schema.sql rather than a migration set \u2014 Go, and small enough to read in one sitting.",
+      "max_lost_constraints": 3
     }
-  ]
+  ],
+  "ceilings": "max_lost_constraints is how many constraints this schema's replay is known to lose \u2014 measured, not assumed. The corpus test asserts it, so a change that starts dropping more fails rather than quietly scoring better for it."
 }

@@ -37,29 +37,31 @@ Reading a database name for the word `prod` stops nobody who called theirs
 So instead: **is the host this machine**, and **do the target tables already
 hold rows** — two facts a person can answer instantly and a tool cannot.
 
-## Reach, on eighteen schemas nobody here wrote
+## Reach, on twenty schemas nobody here wrote
 
 | schema | tables | fillable | reach |
 |---|---:|---:|---:|
 | PowerDNS | 7 | 7 | 100% |
 | Hasura | 8 | 6 | 75% |
 | Kong | 9 | 8 | 89% |
-| Sourcegraph *(codeintel)* | 13 | 9 | 69% |
+| Sourcegraph *(codeintel)* | 13 | 10 | 77% |
 | Harbor | 21 | 21 | 100% |
+| listmonk | 16 | 16 | 100% |
 | Ory Kratos *(replayed migrations)* | 23 | 23 | 100% |
+| Ory Hydra *(replayed migrations)* | 18 | 15 | 83% |
 | Sourcegraph *(insights)* | 21 | 17 | 81% |
 | hex.pm | 36 | 22 | 61% |
 | Vaultwarden *(replayed migrations)* | 29 | 29 | 100% |
 | Temporal | 37 | 36 | 97% |
 | Plausible | 41 | 18 | 44% |
 | Mattermost *(replayed migrations)* | 80 | 75 | 94% |
-| PostgREST *(test fixtures — deliberately awkward)* | 136 | 131 | 96% |
+| PostgREST *(test fixtures — deliberately awkward)* | 134 | 129 | 96% |
 | Synapse | 134 | 126 | 94% |
-| Lago | 138 | 84 | 61% |
-| Sourcegraph *(frontend)* | 180 | 74 | 41% |
+| Lago | 138 | 115 | 83% |
+| Sourcegraph *(frontend)* | 180 | 75 | 42% |
 | Discourse | 351 | 324 | 92% |
 | GitLab | 1,057 | 414 | 39% |
-| **total** | **2,321** | **1,424** | **61%** |
+| **total** | **2,355** | **1,470** | **62%** |
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. Three are *replayed* migration directories rather
@@ -77,7 +79,7 @@ writes SQL; `--plan` reports what it would do and writes nothing.
 Every row it produces is checked by the only authority that matters: a test
 generates for each corpus schema at the default fifty rows, applies the result
 to a real Postgres, and fails if a single statement is rejected. It currently
-generates **1,830 statements across the eighteen schemas and Postgres accepts
+generates **1,940 statements across the twenty schemas and Postgres accepts
 every one** — with every one of their 456 triggers installed, and their 106
 partitioned tables read. The gate is zero, not a percentage — the whole thesis is that the
 database adjudicates, so one row it refuses is a failure rather than a figure

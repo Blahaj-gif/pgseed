@@ -22,7 +22,8 @@ fn what_the_triggers_do() {
     let (mut tables_with, mut raising, mut total) = (0usize, 0usize, 0usize);
     let mut bodies: Vec<(String, String, String)> = Vec::new();
 
-    for name in shared::NAMES {
+    for source in shared::sources() {
+        let name = &source.name;
         let path = Path::new("tests/corpus").join(format!("{name}.sql"));
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
