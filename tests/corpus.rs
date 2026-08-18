@@ -325,7 +325,7 @@ fn measure(name: &str, path: &Path, max_lost: usize) {
                 // A CHECK violation is the one that matters: it is data that
                 // breaks a rule the schema stated, which is the exact failure
                 // this project was built to refuse rather than commit.
-                if matches!(code.as_str(), "23514" | "22000" | "23503") {
+if true {
                     let head: String =
                         statement.lines().take(4).collect::<Vec<_>>().join(" ")
                             .chars().take(320).collect();
@@ -388,6 +388,15 @@ fn reach_against_real_schemas() {
         ("synapse", 0),
         ("discourse", 3),
         ("gitlab", 2),
+        // Six added after the harness was repaired rather than before it, so
+        // that a new denominator and a newly-honest measurement did not land
+        // together and make each other hard to read.
+        ("lago", 0),
+        ("sourcegraph", 0),
+        ("sourcegraph_codeintel", 0),
+        ("sourcegraph_insights", 0),
+        ("plausible", 1),
+        ("hexpm", 2),
     ] {
         measure(name, &Path::new("tests/corpus").join(format!("{name}.sql")), max_lost);
     }

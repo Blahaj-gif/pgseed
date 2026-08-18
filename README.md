@@ -37,20 +37,26 @@ Reading a database name for the word `prod` stops nobody who called theirs
 So instead: **is the host this machine**, and **do the target tables already
 hold rows** — two facts a person can answer instantly and a tool cannot.
 
-## Reach, on nine schemas nobody here wrote
+## Reach, on fifteen schemas nobody here wrote
 
 | schema | tables | fillable | reach |
 |---|---:|---:|---:|
 | PowerDNS | 7 | 7 | 100% |
 | Hasura | 8 | 3 | 38% |
 | Kong | 9 | 8 | 89% |
+| Sourcegraph *(codeintel)* | 13 | 11 | 85% |
 | Harbor | 21 | 21 | 100% |
+| Sourcegraph *(insights)* | 21 | 16 | 76% |
+| hex.pm | 36 | 20 | 56% |
 | Temporal | 37 | 36 | 97% |
+| Plausible | 41 | 38 | 93% |
 | PostgREST *(test fixtures — deliberately awkward)* | 132 | 127 | 96% |
 | Synapse | 134 | 127 | 95% |
+| Lago | 137 | 116 | 85% |
+| Sourcegraph *(frontend)* | 180 | 75 | 42% |
 | Discourse | 351 | 327 | 93% |
 | GitLab | 956 | 241 | 25% |
-| **total** | **1,655** | **897** | **54%** |
+| **total** | **2,083** | **1,173** | **56%** |
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. The corpus is deliberately not written here — a
@@ -65,8 +71,8 @@ writes SQL; `--plan` reports what it would do and writes nothing.
 Every row it produces is checked by the only authority that matters: a test
 generates for each corpus schema at the default fifty rows, applies the result
 to a real Postgres, and fails if a single statement is rejected. It currently
-generates **1,190 statements across the nine schemas and Postgres accepts every
-one**. The gate is zero, not a percentage — the whole thesis is that the
+generates **1,585 statements across the fifteen schemas and Postgres accepts
+every one**. The gate is zero, not a percentage — the whole thesis is that the
 database adjudicates, so one row it refuses is a failure rather than a figure
 to be pleased with.
 

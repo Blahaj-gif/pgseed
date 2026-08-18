@@ -426,18 +426,33 @@ fn render(
             Literal::text(&if *with_zone { format!("{stamp}+00") } else { stamp })
         }
 
-        ColumnType::Interval => Literal::text(&format!("{} days", rng.gen_range(1..90))),
+        ColumnType::Interval => Literal::text(&format!(
+            "{} days",
+            if unique { step } else { rng.gen_range(1..90) }
+        )),
 
         // `{}` unless a CHECK named the type it has to be. `jsonb_typeof` of
         // each of these is exactly the word the constraint asked for, which is
         // the whole of what has to be shown.
-        ColumnType::Json { .. } => Literal::text(match bounds.json_type.as_deref() {
-            Some("array") => "[]",
-            Some("string") => "\"alpha\"",
-            Some("number") => "0",
-            Some("boolean") => "true",
-            Some("null") => "null",
-            _ => "{}",
+        //
+        // A unique one carries the step inside, because a unique index on a
+        // jsonb column is a real thing — Sourcegraph's insights database has
+        // one — and every row was getting `{}`. `jsonb_typeof` of each of
+        // these is still exactly the word the constraint asked for.
+        ColumnType::Json { .. } => Literal::text(&match (bounds.json_type.as_deref(), unique) {
+            (Some("array"), false) => "[]".into(),
+            (Some("array"), true) => format!("[{step}]"),
+            (Some("string"), false) => "\"alpha\"".to_string(),
+            (Some("string"), true) => format!("\"alpha-{step}\""),
+            (Some("number"), false) => "0".into(),
+            (Some("number"), true) => step.to_string(),
+            // Two values and one value respectively: these cannot be made
+            // distinct beyond that, and `volume` is what stops more being
+            // asked of them.
+            (Some("boolean"), _) => if unique && step % 2 == 1 { "false" } else { "true" }.into(),
+            (Some("null"), _) => "null".into(),
+            (_, false) => "{}".into(),
+            (_, true) => format!("{{\"n\": {step}}}"),
         }),
 
         ColumnType::Bytea => {
@@ -453,8 +468,15 @@ fn render(
                 .min(ceiling)
                 .clamp(0, 4096) as usize;
             let mut hex = String::with_capacity(width * 2);
-            for _ in 0..width {
-                hex.push_str(&format!("{:02x}", rng.gen::<u8>()));
+            for byte in 0..width {
+                // A unique column spells the step out in its leading bytes, so
+                // two rows differ for certain rather than very probably.
+                let value = if unique {
+                    ((step >> (8 * byte.min(7))) & 0xff) as u8
+                } else {
+                    rng.gen::<u8>()
+                };
+                hex.push_str(&format!("{value:02x}"));
             }
             Literal(format!("'\\x{hex}'::bytea"))
         }
@@ -462,6 +484,9 @@ fn render(
         ColumnType::Network { kind } => {
             use crate::schema::NetworkKind;
             Literal::text(&match kind {
+                NetworkKind::Inet if unique => format!(
+                    "10.{}.{}.{}", (step / 65_536) % 256, (step / 256) % 256,
+                    (step % 254) + 1),
                 NetworkKind::Inet => format!(
                     "10.{}.{}.{}", rng.gen_range(0..256), rng.gen_range(0..256),
                     rng.gen_range(1..255)),

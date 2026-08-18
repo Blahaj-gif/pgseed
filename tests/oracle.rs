@@ -720,3 +720,27 @@ fn two_keys_that_contend_for_one_column_are_refused_rather_than_hoped_over() {
         "this one should not have been caught by the same rule"
     );
 }
+
+/// A cycle repaired on a table keyed by uuid.
+///
+/// The repair picked its root row with `min(id)`, and `min()` has no overload
+/// for `uuid`. Lago keys all 137 of its tables that way, and said so the first
+/// time it was measured.
+#[test]
+fn a_cycle_is_repaired_on_a_table_keyed_by_something_min_cannot_take() {
+    let (db, _) = seed(
+        "CREATE TABLE charges (
+             id uuid PRIMARY KEY,
+             parent_id uuid REFERENCES charges(id),
+             name text NOT NULL
+         );",
+        8,
+    );
+    assert_eq!(count(&db, "charges"), 8);
+    let roots: i64 = db
+        .client()
+        .query_one("SELECT count(*) FROM charges WHERE parent_id IS NULL", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(roots, 1, "every row but the root should point somewhere");
+}

@@ -300,6 +300,11 @@ pub fn statements(schema: &Schema, verdict: &Verdict, options: &Options) -> Vec<
 /// this the column stays NULL forever, which is *valid* and useless: a
 /// `manager_id` that is null on every row has not modelled anything.
 ///
+/// The root is found by ordering rather than by `min()`, because `min()` has
+/// no overload for `uuid` and Lago keys every one of its 137 tables that way.
+/// `ORDER BY ... LIMIT 1` is the same row and works for anything that can be
+/// compared at all, which is anything that can be a key.
+///
 /// Every row but one is pointed at the lowest-keyed other row — stable,
 /// reproducible, never self-referential. The one left out is the root: a table
 /// where every row has a parent is a closed loop, which is exactly what the
@@ -324,7 +329,7 @@ fn repair_cycles(schema: &Schema, verdict: &Verdict) -> Vec<String> {
             "UPDATE {child} AS c SET {column} = (SELECT p.{parent_column} \
              FROM {parent} AS p WHERE p.{parent_column} <> c.{own_key} \
              ORDER BY p.{parent_column} LIMIT 1) \
-             WHERE c.{own_key} <> (SELECT min(x.{own_key}) FROM {child} AS x);",
+             WHERE c.{own_key} <>                    (SELECT x.{own_key} FROM {child} AS x ORDER BY x.{own_key} LIMIT 1);",
             child = table_id.quoted(),
             column = quote_ident(&fk.columns[0]),
             parent = fk.references.quoted(),

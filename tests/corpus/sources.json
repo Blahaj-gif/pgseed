@@ -2,32 +2,125 @@
   "why": "Real schemas, not written by this project. A hand-written corpus would only contain the constructs its author remembered to handle, which measures agreement rather than accuracy. The files are fetched on purpose and are not committed: they belong to their projects, and the URL is the durable part.",
   "fetch": "python tests/corpus/fetch.py",
   "schemas": [
-    { "name": "powerdns", "file": "powerdns.sql", "project": "PowerDNS/pdns", "licence": "GPL-2.0",
+    {
+      "name": "powerdns",
+      "file": "powerdns.sql",
+      "project": "PowerDNS/pdns",
+      "licence": "GPL-2.0",
       "url": "https://raw.githubusercontent.com/PowerDNS/pdns/master/modules/gpgsqlbackend/schema.pgsql.sql",
-      "notes": "Tiny and old-fashioned. The small end of the range." },
-    { "name": "hasura", "file": "hasura.sql", "project": "hasura/graphql-engine", "licence": "Apache-2.0",
+      "notes": "Tiny and old-fashioned. The small end of the range."
+    },
+    {
+      "name": "hasura",
+      "file": "hasura.sql",
+      "project": "hasura/graphql-engine",
+      "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/hasura/graphql-engine/master/server/src-rsr/initialise.sql",
-      "notes": "A catalog schema: jsonb-heavy." },
-    { "name": "kong", "file": "kong.sql", "project": "Kong/kong", "licence": "Apache-2.0",
+      "notes": "A catalog schema: jsonb-heavy."
+    },
+    {
+      "name": "kong",
+      "file": "kong.sql",
+      "project": "Kong/kong",
+      "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/Kong/kong/master/kong/db/migrations/core/000_base.lua",
-      "notes": "SQL embedded in a Lua migration; exercises the statement splitter on unusual surroundings." },
-    { "name": "harbor", "file": "harbor.sql", "project": "goharbor/harbor", "licence": "Apache-2.0",
+      "notes": "SQL embedded in a Lua migration; exercises the statement splitter on unusual surroundings."
+    },
+    {
+      "name": "harbor",
+      "file": "harbor.sql",
+      "project": "goharbor/harbor",
+      "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/goharbor/harbor/main/make/migrations/postgresql/0001_initial_schema.up.sql",
-      "notes": "A hand-written initial migration rather than a generated dump." },
-    { "name": "temporal", "file": "temporal.sql", "project": "temporalio/temporal", "licence": "MIT",
+      "notes": "A hand-written initial migration rather than a generated dump."
+    },
+    {
+      "name": "temporal",
+      "file": "temporal.sql",
+      "project": "temporalio/temporal",
+      "licence": "MIT",
       "url": "https://raw.githubusercontent.com/temporalio/temporal/main/schema/postgresql/v12/temporal/schema.sql",
-      "notes": "Bytea and composite primary keys throughout." },
-    { "name": "postgrest", "file": "postgrest.sql", "project": "PostgREST/postgrest", "licence": "MIT",
+      "notes": "Bytea and composite primary keys throughout."
+    },
+    {
+      "name": "postgrest",
+      "file": "postgrest.sql",
+      "project": "PostgREST/postgrest",
+      "licence": "MIT",
       "url": "https://raw.githubusercontent.com/PostgREST/postgrest/main/test/spec/fixtures/schema.sql",
-      "notes": "The most valuable one: a test fixture, so it is deliberately adversarial. Domains, composite types, odd identifiers, constraints written to be awkward." },
-    { "name": "synapse", "file": "synapse.sql", "project": "element-hq/synapse", "licence": "AGPL-3.0",
+      "notes": "The most valuable one: a test fixture, so it is deliberately adversarial. Domains, composite types, odd identifiers, constraints written to be awkward."
+    },
+    {
+      "name": "synapse",
+      "file": "synapse.sql",
+      "project": "element-hq/synapse",
+      "licence": "AGPL-3.0",
       "url": "https://raw.githubusercontent.com/element-hq/synapse/develop/synapse/storage/schema/main/full_schemas/72/full.sql.postgres",
-      "notes": "Matrix homeserver, ~134 tables, modest use of CHECK." },
-    { "name": "discourse", "file": "discourse.sql", "project": "discourse/discourse", "licence": "GPL-2.0",
+      "notes": "Matrix homeserver, ~134 tables, modest use of CHECK."
+    },
+    {
+      "name": "discourse",
+      "file": "discourse.sql",
+      "project": "discourse/discourse",
+      "licence": "GPL-2.0",
       "url": "https://raw.githubusercontent.com/discourse/discourse/main/db/structure.sql",
-      "notes": "A large Rails structure.sql." },
-    { "name": "gitlab", "file": "gitlab.sql", "project": "gitlabhq/gitlabhq", "licence": "MIT",
+      "notes": "A large Rails structure.sql."
+    },
+    {
+      "name": "gitlab",
+      "file": "gitlab.sql",
+      "project": "gitlabhq/gitlabhq",
+      "licence": "MIT",
       "url": "https://raw.githubusercontent.com/gitlabhq/gitlabhq/master/db/structure.sql",
-      "notes": "~955 tables and 2,537 CHECK expressions. The schema that showed the refuse-every-CHECK policy was too blunt to be useful." }
+      "notes": "~955 tables and 2,537 CHECK expressions. The schema that showed the refuse-every-CHECK policy was too blunt to be useful."
+    },
+    {
+      "name": "lago",
+      "file": "lago.sql",
+      "project": "getlago/lago-api",
+      "licence": "AGPL-3.0",
+      "url": "https://raw.githubusercontent.com/getlago/lago-api/main/db/structure.sql",
+      "notes": "A modern Rails structure.sql \u2014 billing, a decade newer than Discourse's lineage."
+    },
+    {
+      "name": "sourcegraph",
+      "file": "sourcegraph.sql",
+      "project": "sourcegraph/sourcegraph-public-snapshot",
+      "licence": "Apache-2.0",
+      "url": "https://raw.githubusercontent.com/sourcegraph/sourcegraph-public-snapshot/main/migrations/frontend/squashed.sql",
+      "notes": "A squashed Go migration set. Heavy on expression indexes, which is why it is here."
+    },
+    {
+      "name": "sourcegraph_codeintel",
+      "file": "sourcegraph_codeintel.sql",
+      "project": "sourcegraph/sourcegraph-public-snapshot",
+      "licence": "Apache-2.0",
+      "url": "https://raw.githubusercontent.com/sourcegraph/sourcegraph-public-snapshot/main/migrations/codeintel/squashed.sql",
+      "notes": "A second, genuinely separate database from the same product."
+    },
+    {
+      "name": "sourcegraph_insights",
+      "file": "sourcegraph_insights.sql",
+      "project": "sourcegraph/sourcegraph-public-snapshot",
+      "licence": "Apache-2.0",
+      "url": "https://raw.githubusercontent.com/sourcegraph/sourcegraph-public-snapshot/main/migrations/codeinsights/squashed.sql",
+      "notes": "A third. Time-series shaped, unlike anything else in the corpus."
+    },
+    {
+      "name": "plausible",
+      "file": "plausible.sql",
+      "project": "plausible/analytics",
+      "licence": "AGPL-3.0",
+      "url": "https://raw.githubusercontent.com/plausible/analytics/master/priv/repo/structure.sql",
+      "notes": "Ecto rather than Rails or hand-written; a different generator's habits."
+    },
+    {
+      "name": "hexpm",
+      "file": "hexpm.sql",
+      "project": "hexpm/hexpm",
+      "licence": "Apache-2.0",
+      "url": "https://raw.githubusercontent.com/hexpm/hexpm/main/priv/repo/structure.sql",
+      "notes": "Ecto, and a package registry \u2014 versions, checksums, wide unique keys."
+    }
   ]
 }
