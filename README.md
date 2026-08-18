@@ -53,13 +53,13 @@ hold rows** — two facts a person can answer instantly and a tool cannot.
 | Temporal | 37 | 36 | 97% |
 | Plausible | 41 | 18 | 44% |
 | Mattermost *(replayed migrations)* | 80 | 75 | 94% |
-| PostgREST *(test fixtures — deliberately awkward)* | 132 | 129 | 98% |
+| PostgREST *(test fixtures — deliberately awkward)* | 136 | 131 | 96% |
 | Synapse | 134 | 126 | 94% |
-| Lago | 137 | 84 | 61% |
+| Lago | 138 | 84 | 61% |
 | Sourcegraph *(frontend)* | 180 | 74 | 41% |
 | Discourse | 351 | 324 | 92% |
-| GitLab | 956 | 413 | 43% |
-| **total** | **2,215** | **1,421** | **64%** |
+| GitLab | 1,057 | 414 | 39% |
+| **total** | **2,321** | **1,424** | **61%** |
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. Three are *replayed* migration directories rather
@@ -78,7 +78,8 @@ Every row it produces is checked by the only authority that matters: a test
 generates for each corpus schema at the default fifty rows, applies the result
 to a real Postgres, and fails if a single statement is rejected. It currently
 generates **1,830 statements across the eighteen schemas and Postgres accepts
-every one** — with every one of their 456 triggers installed. The gate is zero, not a percentage — the whole thesis is that the
+every one** — with every one of their 456 triggers installed, and their 106
+partitioned tables read. The gate is zero, not a percentage — the whole thesis is that the
 database adjudicates, so one row it refuses is a failure rather than a figure
 to be pleased with.
 

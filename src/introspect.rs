@@ -26,7 +26,7 @@ const TABLES_SQL: &str = "
     SELECT n.nspname, c.relname
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relkind = 'r'
+    WHERE c.relkind IN ('r', 'p')
       AND NOT c.relispartition
       AND n.nspname = ANY($1)
     ORDER BY n.nspname, c.relname";
@@ -54,7 +54,7 @@ const COLUMNS_SQL: &str = "
     LEFT JOIN pg_type bt ON bt.oid = t.typbasetype
     LEFT JOIN pg_type et ON et.oid = t.typelem
     LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-    WHERE c.relkind = 'r'
+    WHERE c.relkind IN ('r', 'p')
       AND NOT c.relispartition
       AND n.nspname = ANY($1)
       AND a.attnum > 0
@@ -170,6 +170,32 @@ const TRIGGERS_SQL: &str = "
       AND (t.tgtype & 4) <> 0
       AND n.nspname = ANY($1)
     ORDER BY n.nspname, c.relname, t.tgname";
+
+/// Partitioned tables, their key, and the bounds of every partition under
+/// them.
+///
+/// A partitioned parent holds no rows of its own, so a row that falls outside
+/// every partition is refused. Reading them is what stops everything that
+/// references one from being refused for pointing at a table nobody read.
+const PARTITIONS_SQL: &str = "
+    SELECT n.nspname, c.relname,
+           pg_get_partkeydef(c.oid) AS key,
+           (SELECT array_agg(pg_get_expr(child.relpartbound, child.oid))
+              FROM pg_inherits i
+              JOIN pg_class child ON child.oid = i.inhrelid
+             WHERE i.inhparent = c.oid) AS bounds,
+           -- A partition may carry rules of its own that the parent does not.
+           -- GitLab's `project_uploads` has a CHECK the parent `uploads` has
+           -- no sign of, and a row routed into it is judged by that CHECK.
+           (SELECT count(*)
+              FROM pg_inherits i
+              JOIN pg_constraint con ON con.conrelid = i.inhrelid
+             WHERE i.inhparent = c.oid AND con.contype = 'c') AS own_rules
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind = 'p'
+      AND NOT c.relispartition
+      AND n.nspname = ANY($1)";
 
 const ENUMS_SQL: &str = "
     SELECT t.typname, n.nspname, e.enumlabel
@@ -452,6 +478,52 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
     // Triggers that can stop an insert. Recorded as checks, because that is
     // exactly what they are — a rule over the row that this cannot satisfy —
     // and because the refusal then quotes the trigger by name like any other.
+    // Partitioned tables: either every row lands somewhere, or the table is
+    // refused. Recorded as checks so the refusal reads like every other one.
+    let mut partitioned_tables: Vec<TableId> = Vec::new();
+    for row in client.query(PARTITIONS_SQL, &[&schemas])? {
+        let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
+        partitioned_tables.push(id.clone());
+        let Some(table) = schema.tables.get_mut(&id) else {
+            continue;
+        };
+        let key: String = row.get("key");
+        let bounds: Vec<String> = row.try_get("bounds").unwrap_or_default();
+        let own_rules: i64 = row.try_get("own_rules").unwrap_or(0);
+
+        // A partition carrying its own CHECK judges the rows routed into it by
+        // a rule the parent never mentions, and nothing here reads it.
+        if own_rules > 0 {
+            table.checks.push(CheckConstraint {
+                name: format!("{}:partitions", id.name),
+                definition: format!(
+                    "PARTITION BY {key} — {own_rules} of its partitions carry                      constraints of their own, which this does not read"
+                ),
+            });
+            continue;
+        }
+
+        match crate::partitions::interpret(&key, &bounds) {
+            crate::partitions::Routing::Anything => {}
+            crate::partitions::Routing::OneOf { column, values } => {
+                // The same shape `checks` already knows, so it goes in as one
+                // rather than as a second way of saying it.
+                table.checks.push(CheckConstraint {
+                    name: format!("{}:partitions", id.name),
+                    definition: format!("CHECK (({column} = ANY (ARRAY[{}])))", values.join(", ")),
+                });
+            }
+            crate::partitions::Routing::Unknown => {
+                table.checks.push(CheckConstraint {
+                    name: format!("{}:partitions", id.name),
+                    definition: format!(
+                        "PARTITION BY {key} — this cannot show a row lands in any partition"
+                    ),
+                });
+            }
+        }
+    }
+
     let mut written_by_triggers: Vec<(String, String, TableId)> = Vec::new();
     for row in client.query(TRIGGERS_SQL, &[&schemas])? {
         let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
@@ -482,7 +554,13 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
             .cloned()
             .collect();
 
-        if ids.is_empty() {
+        let partitioned: Vec<TableId> = ids
+            .iter()
+            .filter(|id| partitioned_tables.contains(id))
+            .cloned()
+            .collect();
+
+        if ids.is_empty() || !partitioned.is_empty() {
             // The target was never read — a partitioned table, most often. The
             // write may fail for reasons invisible from here, so the table
             // carrying the trigger cannot be filled.
@@ -490,11 +568,13 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
                 table.checks.push(CheckConstraint {
                     name: format!("{trigger}:writes"),
                     definition: format!(
-                        "TRIGGER {trigger} writes rows into {target}, which was not read"
+                        "TRIGGER {trigger} writes rows into {target}, which was not                          read or is partitioned — the write cannot be shown to land"
                     ),
                 });
             }
-            continue;
+            if ids.is_empty() {
+                continue;
+            }
         }
 
         // The target was read, so the write itself is as safe as filling it —
