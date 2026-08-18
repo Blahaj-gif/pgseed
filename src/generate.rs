@@ -33,6 +33,10 @@ pub struct Bounds {
     pub must_be_null: bool,
     /// The JSON type the value has to be, from `jsonb_typeof(col) = 'object'`.
     pub json_type: Option<String>,
+    /// The only values a CHECK will accept, as SQL literals, from
+    /// `col = ANY (ARRAY[...])`. Written out verbatim: they are already valid
+    /// SQL and re-rendering could only lose a cast.
+    pub value_set: Option<Vec<String>>,
     /// Every generated word is lowercase already, so this changes nothing
     /// today. It is recorded anyway: relying on a coincidence in a word list
     /// is not the same as honouring a constraint, and the day somebody adds
@@ -77,6 +81,17 @@ pub fn bounds_for(table: &Table) -> BTreeMap<String, Bounds> {
                 // a character ceiling are the same ceiling.
                 let entry = out.entry(column).or_default();
                 entry.max_length = Some(entry.max_length.map_or(max, |m: i32| m.min(max)));
+            }
+            Meaning::ValueSet { column, values } => {
+                let entry = out.entry(column).or_default();
+                // Two sets over one column leave only what they share.
+                entry.value_set = Some(match entry.value_set.take() {
+                    Some(existing) => existing
+                        .into_iter()
+                        .filter(|v| values.contains(v))
+                        .collect(),
+                    None => values,
+                });
             }
             Meaning::JsonType { column, kind } => {
                 out.entry(column).or_default().json_type = Some(kind);
@@ -271,6 +286,22 @@ pub fn value(
     if bounds.must_be_null {
         return Literal::null();
     }
+    // A listed set of values overrides the type entirely: whatever an integer
+    // column would otherwise hold, this one holds one of these.
+    if let Some(values) = &bounds.value_set {
+        if values.is_empty() {
+            // Two sets with nothing in common. `classify` rejects that before
+            // it can reach here, and returning NULL rather than panicking is
+            // the right way to be wrong about it.
+            return Literal::null();
+        }
+        let index = match variation {
+            Some(stride) => (row / stride.max(1)) % values.len(),
+            None => stream(seed, table, &column.name, row).gen_range(0..values.len()),
+        };
+        return Literal(values[index].clone());
+    }
+
     let mut rng = stream(seed, table, &column.name, row);
     // The stride is how often this column has to change: every row for a
     // single-column key, every Nth row for a digit of a composite one. The

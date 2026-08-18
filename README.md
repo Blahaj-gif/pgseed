@@ -42,7 +42,7 @@ hold rows** — two facts a person can answer instantly and a tool cannot.
 | schema | tables | fillable | reach |
 |---|---:|---:|---:|
 | PowerDNS | 7 | 7 | 100% |
-| Hasura | 8 | 3 | 38% |
+| Hasura | 8 | 6 | 75% |
 | Kong | 9 | 8 | 89% |
 | Sourcegraph *(codeintel)* | 13 | 9 | 69% |
 | Harbor | 21 | 21 | 100% |
@@ -58,8 +58,8 @@ hold rows** — two facts a person can answer instantly and a tool cannot.
 | Lago | 137 | 84 | 61% |
 | Sourcegraph *(frontend)* | 180 | 74 | 41% |
 | Discourse | 351 | 324 | 92% |
-| GitLab | 956 | 412 | 43% |
-| **total** | **2,215** | **1,417** | **64%** |
+| GitLab | 956 | 413 | 43% |
+| **total** | **2,215** | **1,421** | **64%** |
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. Three are *replayed* migration directories rather
@@ -136,6 +136,7 @@ looking similar.
 | `num_nonnulls(a, b[, c]) = 1` | fill one, NULL the rest |
 | `jsonb_typeof(col) = 'object'` | emit a value of that type |
 | `cardinality(col) <= N` | every array written holds one element |
+| `col = ANY (ARRAY[…])` | write one of the listed values |
 
 Exclusion constraints are read as the checks they are and refuse. Not seeing a
 constraint is not the same as satisfying it.

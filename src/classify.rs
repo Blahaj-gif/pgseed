@@ -133,6 +133,11 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
             // Every value this generates is at least one character long, so a
             // column that must not be empty already is not.
             Meaning::NonEmpty { column } => table.column(&column).is_some(),
+            // One of a listed set of values, which is an enum written out
+            // longhand and satisfied the same way.
+            Meaning::ValueSet { column, values } => {
+                !values.is_empty() && table.column(&column).is_some()
+            }
             // At least one of them holds a value, and all of them are filled
             // unless a foreign key had nowhere to point. One that certainly
             // gets a value is enough, and `filled_column` finds it.

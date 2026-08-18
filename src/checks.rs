@@ -87,6 +87,12 @@ pub enum Meaning {
     /// Weaker than `ExactlyOneNonNull` and satisfied by filling all of them,
     /// which is what happens anyway.
     AtLeastOneNonNull { columns: Vec<String> },
+    /// `col = ANY (ARRAY['a', 'b'])`. A value set, which is an enum written
+    /// out longhand — and satisfied the same way, by writing one of them.
+    /// The literals are kept exactly as Postgres printed them, casts and all,
+    /// because that is already valid SQL and re-rendering could only lose
+    /// something.
+    ValueSet { column: String, values: Vec<String> },
     /// Anything at all that is not exactly one of the above.
     Unknown,
 }
@@ -215,6 +221,27 @@ fn split_top<'t>(text: &'t str, operator: &str) -> Option<(&'t str, &'t str)> {
         }
     }
     None
+}
+
+/// Split a comma-separated list at the top level, respecting parentheses,
+/// brackets and quotes.
+fn split_top_all(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start, mut quoted) = (0i32, 0usize, false);
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '\u{27}' => quoted = !quoted,
+            '(' | '[' if !quoted => depth += 1,
+            ')' | ']' if !quoted => depth -= 1,
+            ',' if !quoted && depth == 0 => {
+                out.push(&text[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&text[start..]);
+    out
 }
 
 /// Read a constraint definition, and say what it means only when that is
@@ -433,6 +460,39 @@ pub fn interpret(definition: &str) -> Meaning {
         }
     }
 
+    // `col = ANY (ARRAY[...])` — one of a listed set of values.
+    //
+    // Only in that exact shape. `NOT ('' = ANY (col))` is a different rule
+    // about an array column, and `col = ANY (subquery)` names values this
+    // cannot see; both stay unknown.
+    if let Some((left, right)) = split_top(expression, "=") {
+        if !left.ends_with(['<', '>', '!']) {
+            if let Some(column) = column_cast(left) {
+                if let Some(list) = call_argument(unwrap_parens(right.trim()), "ANY")
+                    .and_then(|inner| call_argument(inner, "ARRAY"))
+                    .or_else(|| {
+                        // `ANY (ARRAY[...])` prints with brackets rather than
+                        // parentheses around the elements.
+                        call_argument(unwrap_parens(right.trim()), "ANY").and_then(|inner| {
+                            unwrap_parens(inner.trim())
+                                .strip_prefix("ARRAY[")
+                                .and_then(|s| s.strip_suffix(']'))
+                        })
+                    })
+                {
+                    let values: Vec<String> = split_top_all(list)
+                        .into_iter()
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect();
+                    if !values.is_empty() {
+                        return Meaning::ValueSet { column, values };
+                    }
+                }
+            }
+        }
+    }
+
     // `jsonb_typeof(col) = 'object'`, and the five other JSON types.
     if let Some((left, right)) = split_top(expression, "=") {
         if !left.ends_with(['<', '>', '!']) {
@@ -560,6 +620,37 @@ mod tests {
         ] {
             assert_eq!(interpret(definition), Meaning::Unknown, "{definition}");
         }
+    }
+
+    #[test]
+    fn a_value_set_is_read_and_a_negated_one_is_not() {
+        assert_eq!(
+            interpret("CHECK ((status = ANY (ARRAY['created'::text, 'error'::text])))"),
+            Meaning::ValueSet {
+                column: "status".into(),
+                values: vec!["'created'::text".into(), "'error'::text".into()],
+            }
+        );
+        assert_eq!(
+            interpret("CHECK ((cadence = ANY (ARRAY[1, 7, 14, 30, 90])))"),
+            Meaning::ValueSet {
+                column: "cadence".into(),
+                values: ["1", "7", "14", "30", "90"]
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect(),
+            }
+        );
+        // A rule about what the column may *not* be, and one about the
+        // contents of an array column. Neither is this shape.
+        assert_eq!(
+            interpret("CHECK ((NOT (''::text = ANY ((permissions)::text[]))))"),
+            Meaning::Unknown
+        );
+        assert_eq!(
+            interpret("CHECK ((status <> ANY (ARRAY['a'::text])))"),
+            Meaning::Unknown
+        );
     }
 
     #[test]

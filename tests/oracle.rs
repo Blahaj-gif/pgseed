@@ -868,3 +868,37 @@ fn a_column_obliged_to_be_null_cannot_also_be_the_one_holding_a_value() {
         verdict.refused
     );
 }
+
+/// A value set is an enum written out longhand.
+#[test]
+fn a_column_restricted_to_a_list_of_values_gets_one_of_them() {
+    let (db, _) = seed(
+        "CREATE TABLE jobs (
+             id      int PRIMARY KEY,
+             status  text NOT NULL,
+             cadence int NOT NULL,
+             CONSTRAINT ok_status CHECK ((status = ANY (ARRAY['created'::text, 'error'::text]))),
+             CONSTRAINT ok_cadence CHECK ((cadence = ANY (ARRAY[1, 7, 30])))
+         );
+         CREATE TABLE only_two (
+             id int PRIMARY KEY,
+             s  text NOT NULL UNIQUE,
+             CONSTRAINT ok CHECK ((s = ANY (ARRAY['a'::text, 'b'::text])))
+         );",
+        25,
+    );
+    assert_eq!(count(&db, "jobs"), 25);
+    // A unique column over a two-value set holds two rows, and `volume` knows
+    // it for the same reason it knows a boolean holds two.
+    assert_eq!(count(&db, "only_two"), 2, "two values, two rows");
+
+    let kinds: i64 = db
+        .client()
+        .query_one(
+            "SELECT count(*) FROM (SELECT DISTINCT status FROM jobs) d",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(kinds, 2, "both values should get used");
+}

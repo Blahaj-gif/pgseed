@@ -51,10 +51,21 @@ pub fn domain_size(type_: &ColumnType) -> Option<usize> {
 fn column_domain(table: &Table, name: &str) -> Option<usize> {
     let column = table.column(name)?;
     let by_type = domain_size(&column.type_);
-    let by_check = crate::generate::bounds_for(table)
+    let bounds = crate::generate::bounds_for(table);
+    let by_check = bounds
         .get(name)
         .and_then(|b| b.max_length)
         .and_then(crate::generate::text_domain);
+    // A listed set of values is as small a domain as an enum, and a unique
+    // column over one holds exactly as many rows as it has values.
+    let by_set = bounds
+        .get(name)
+        .and_then(|b| b.value_set.as_ref())
+        .map(Vec::len);
+    let by_type = match (by_type, by_set) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
     match (by_type, by_check) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
