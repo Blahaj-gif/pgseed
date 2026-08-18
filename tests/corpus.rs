@@ -16,6 +16,26 @@
 //! attachments and settings that a bare database will refuse, and the point is
 //! not to replay the dump faithfully — it is to get a large, real, tangled
 //! schema into a database and then ask what can be done with it.
+//!
+//! # What this gate does not see, and therefore does not promise
+//!
+//! Only table, constraint and index DDL is applied. Two kinds of rule are
+//! filtered out with the noise, and both can reject a row:
+//!
+//!   - **Triggers.** Discourse has one that raises `require_reply_approval in
+//!     category_settings is readonly` on insert. Nothing here reads triggers,
+//!     so a table carrying one is filled without regard to it.
+//!   - **Partition routing.** A row written to a partitioned table needs a
+//!     partition whose bounds cover it, and GitLab reports `no partition of
+//!     relation ... found for row`. Partitioned parents are not read at all,
+//!     which is why their children are refused for pointing at something
+//!     unread — but the parents themselves are simply absent.
+//!
+//! Both were found by the `volume` benchmark below, which applies the *whole*
+//! dump rather than the filtered part, and both are named here rather than
+//! left implicit. A gate measuring a database less constrained than the real
+//! one has flattered this project twice already, and saying where it still
+//! does is the only honest way to quote its number.
 
 mod harness;
 
