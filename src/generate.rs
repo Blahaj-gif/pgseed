@@ -585,6 +585,49 @@ fn render(
 }
 
 #[cfg(test)]
+mod cost {
+    //! Where the time goes when a large schema is generated.
+    //!
+    //! `cargo test --lib -- --ignored --nocapture cost`
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn what_a_cell_costs() {
+        let table = TableId::new("public", "t");
+        let column = Column {
+            name: "note".into(),
+            type_: ColumnType::Text { max_length: None },
+            nullable: false,
+            has_default: false,
+            default_is_sequence: false,
+            is_generated: false,
+            position: 1,
+        };
+        let bounds = Bounds::default();
+        const N: usize = 200_000;
+
+        let started = std::time::Instant::now();
+        let mut sink = 0usize;
+        for row in 0..N {
+            sink += stream(1, &table, "note", row).gen::<u8>() as usize;
+        }
+        let seeding = started.elapsed();
+
+        let started = std::time::Instant::now();
+        for row in 0..N {
+            sink += value(1, &table, &column, row, &bounds, None).0.len();
+        }
+        let whole = started.elapsed();
+
+        println!(
+            "  {N} cells: seeding {seeding:?}, whole value {whole:?}              ({:.0}% of it is seeding). sink={sink}",
+            100.0 * seeding.as_secs_f64() / whole.as_secs_f64()
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::CheckConstraint;
