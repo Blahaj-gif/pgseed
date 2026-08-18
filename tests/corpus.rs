@@ -195,7 +195,14 @@ fn measure(name: &str, path: &Path, max_lost: usize) {
             // database less constrained than the real one — which is the one
             // way a gate can flatter itself.
             || head.starts_with("CREATE INDEX")
-            || head.starts_with("CREATE UNIQUE INDEX"))
+            || head.starts_with("CREATE UNIQUE INDEX")
+            // A trigger is a rule about what may be written, and Discourse has
+            // one that raises on insert. Leaving them out made this measure a
+            // database that could not refuse what the real one refuses — the
+            // third time that has been true here, after unique indexes and
+            // after a comment banner swallowed the statement following it.
+            || head.starts_with("CREATE TRIGGER")
+            || head.starts_with("CREATE OR REPLACE TRIGGER"))
         {
             continue;
         }
@@ -352,7 +359,7 @@ fn measure(name: &str, path: &Path, max_lost: usize) {
                 // A CHECK violation is the one that matters: it is data that
                 // breaks a rule the schema stated, which is the exact failure
                 // this project was built to refuse rather than commit.
-                if true {
+                if matches!(code.as_str(), "23514" | "22000" | "23503") {
                     let head: String = statement
                         .lines()
                         .take(4)

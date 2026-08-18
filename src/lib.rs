@@ -18,4 +18,5 @@ pub mod graph;
 pub mod indexes;
 pub mod introspect;
 pub mod schema;
+pub mod triggers;
 pub mod volume;

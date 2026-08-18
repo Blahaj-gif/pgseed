@@ -151,6 +151,26 @@ const UNIQUE_INDEXES_SQL: &str = "
               AND con.contype IN ('p', 'u', 'x'))
     ORDER BY n.nspname, c.relname, i.relname";
 
+/// Row-level triggers that fire on insert, with the body of the function they
+/// call.
+///
+/// Anything that fires on insert, at row level or statement level. Statement
+/// level was excluded at first on the reasoning that it fires once regardless
+/// of what is in the rows — which is true and beside the point, because
+/// GitLab's copies the whole `NEW TABLE` into a partitioned table and the
+/// routing fails. `tgtype` bit 2 is INSERT; `tgisinternal` marks the triggers
+/// Postgres creates to implement foreign keys, already read as constraints.
+const TRIGGERS_SQL: &str = "
+    SELECT n.nspname, c.relname, t.tgname, p.prosrc
+    FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+    JOIN pg_proc p ON p.oid = t.tgfoid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE NOT t.tgisinternal
+      AND (t.tgtype & 4) <> 0
+      AND n.nspname = ANY($1)
+    ORDER BY n.nspname, c.relname, t.tgname";
+
 const ENUMS_SQL: &str = "
     SELECT t.typname, n.nspname, e.enumlabel
     FROM pg_enum e
@@ -425,6 +445,66 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
             // index that enforces no uniqueness at all can still reject one.
             crate::indexes::Requirement::Unknown => {
                 table.checks.push(CheckConstraint { name, definition });
+            }
+        }
+    }
+
+    // Triggers that can stop an insert. Recorded as checks, because that is
+    // exactly what they are — a rule over the row that this cannot satisfy —
+    // and because the refusal then quotes the trigger by name like any other.
+    let mut written_by_triggers: Vec<(String, String, TableId)> = Vec::new();
+    for row in client.query(TRIGGERS_SQL, &[&schemas])? {
+        let id = TableId::new(row.get::<_, String>(0), row.get::<_, String>(1));
+        let Some(table) = schema.tables.get_mut(&id) else {
+            continue;
+        };
+        let name: String = row.get("tgname");
+        let body: String = row.get("prosrc");
+        if crate::triggers::interferes(&body) {
+            table.checks.push(CheckConstraint {
+                name: name.clone(),
+                definition: format!(
+                    "TRIGGER {name} raises on insert, rewrites the row, or writes elsewhere"
+                ),
+            });
+        }
+        for target in crate::triggers::writes_to(&body) {
+            written_by_triggers.push((target, name.clone(), id.clone()));
+        }
+    }
+
+    for (target, trigger, source) in written_by_triggers {
+        // Unqualified, so matched by name across the schemas that were read.
+        let ids: Vec<TableId> = schema
+            .tables
+            .keys()
+            .filter(|id| id.name.eq_ignore_ascii_case(&target))
+            .cloned()
+            .collect();
+
+        if ids.is_empty() {
+            // The target was never read — a partitioned table, most often. The
+            // write may fail for reasons invisible from here, so the table
+            // carrying the trigger cannot be filled.
+            if let Some(table) = schema.tables.get_mut(&source) {
+                table.checks.push(CheckConstraint {
+                    name: format!("{trigger}:writes"),
+                    definition: format!(
+                        "TRIGGER {trigger} writes rows into {target}, which was not read"
+                    ),
+                });
+            }
+            continue;
+        }
+
+        // The target was read, so the write itself is as safe as filling it —
+        // but the rows it receives are not ones this counted.
+        for id in ids {
+            if let Some(table) = schema.tables.get_mut(&id) {
+                table.checks.push(CheckConstraint {
+                    name: format!("{trigger}:writes"),
+                    definition: format!("TRIGGER {trigger} writes rows into this table"),
+                });
             }
         }
     }
