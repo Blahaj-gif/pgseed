@@ -209,6 +209,14 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
                 // unique constraint, and until indexes were applied at all
                 // this could not have counted one. Leaving it out now would be
                 // the same hole one level down.
+                // A function this can supply exactly is supplied, and then
+                // the statement that needed it is not a loss at all.
+                if let Some(shimmed) = corpus_shared::shim_for(&mut client, &statement) {
+                    eprintln!(
+                        "      SHIMMED {shimmed}: this Postgres has no library for it, so                          the one function the corpus needs is defined from core instead"
+                    );
+                    continue;
+                }
                 if head.starts_with("CREATE EXTENSION") {
                     // `CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH ...`
                     // and the unquoted form alike.
@@ -311,6 +319,26 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
         }
     }
 
+    // Tables no tool could fill: a partitioned parent with nothing attached
+    // takes no row, and neither does anything whose required key points at
+    // one, however far down that reaches. Counted so the headline can carry
+    // both denominators: the share of every table, which judges this tool, and
+    // the share of the tables that can hold a row, which is what somebody
+    // deciding whether to run it wants. Printing only the second would be
+    // flattery; printing only the first hides that a twelfth of the corpus is
+    // unfillable by anybody.
+    let impossible = structurally_unfillable(&schema);
+    let no_partitions = impossible
+        .iter()
+        .filter(|id| {
+            schema.get(id).is_some_and(|t| {
+                t.checks
+                    .iter()
+                    .any(|c| c.definition.contains("with no partitions attached"))
+            })
+        })
+        .count();
+
     println!(
         "\n  {name}\n    {applied} applied, {skipped} skipped, {lost_constraints} of them constraints a live table has now lost\n    \
          {} tables · {} fillable · {} refused · REACH {:.0}%\n    \
@@ -321,6 +349,15 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
         verdict.refused.len(),
         verdict.reach() * 100.0,
     );
+    if !impossible.is_empty() {
+        let can_hold = schema.len().saturating_sub(impossible.len());
+        println!(
+            "    {} can hold no row at all ({no_partitions} partitioned with nothing attached, {} downstream of one). Of the rest, REACH {:.0}%",
+            impossible.len(),
+            impossible.len() - no_partitions,
+            100.0 * verdict.fillable.len() as f64 / can_hold.max(1) as f64,
+        );
+    }
 
     // The insert order must be a real topological order: every table appears
     // after everything it requires. This is the property the whole plan rests
@@ -439,6 +476,46 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
     );
 
     Some(coverage)
+}
+
+/// Tables that can hold no row whatever any tool does.
+///
+/// A partitioned parent with no partitions attached is one; so is anything
+/// whose *required* key points at one, transitively. A nullable key is not a
+/// requirement, since the child can be written with a NULL there, so the walk
+/// stops at those.
+fn structurally_unfillable(
+    schema: &pgsow::schema::Schema,
+) -> std::collections::BTreeSet<pgsow::schema::TableId> {
+    let mut out: std::collections::BTreeSet<pgsow::schema::TableId> = schema
+        .tables
+        .values()
+        .filter(|t| {
+            t.checks
+                .iter()
+                .any(|c| c.definition.contains("with no partitions attached"))
+        })
+        .map(|t| t.id.clone())
+        .collect();
+
+    let mut growing = true;
+    while growing {
+        growing = false;
+        for table in schema.tables.values() {
+            if out.contains(&table.id) {
+                continue;
+            }
+            if table
+                .foreign_keys
+                .iter()
+                .any(|fk| out.contains(&fk.references) && !fk.is_optional(table))
+            {
+                out.insert(table.id.clone());
+                growing = true;
+            }
+        }
+    }
+    out
 }
 
 #[test]

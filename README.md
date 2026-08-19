@@ -76,7 +76,7 @@ keeps what it accepts — see `--probe` below.
 | Sourcegraph *(frontend)* | 180 | 43% | 83% |
 | Discourse | 351 | 97% | 99% |
 | GitLab | 1,057 | 40% | 77% |
-| **total** | **2,353** | **64.9%** | **87.7%** |
+| **total** | **2,354** | **64.9%** | **87.7%** |
 
 Measured twice on separate runs, byte-identical both times, and the two
 harnesses — the corpus gate and the probe survey — now agree table for table.
@@ -84,13 +84,30 @@ They did not always: the gate loaded schema DDL and the survey loaded whole
 dumps, seed rows included, so they were measuring different databases and
 reporting a two-table discrepancy. One definition of what loads, shared.
 
+### Two denominators, because 100 of those tables can hold no row at all
+
+|  | by reasoning | with `--probe` |
+|---|---:|---:|
+| of every table in the corpus | 64.9% | **87.7%** |
+| of the tables that can hold a row | 67.7% | **91.6%** |
+
+Both are printed because each answers a different question. The first judges
+this tool. The second is what somebody deciding whether to run it wants, and it
+is not a flattering restatement of the first as long as the difference is
+named: **83 partitioned tables in the corpus have no partitions attached**, and
+17 more sit downstream of one. A partitioned table with nothing attached takes
+no row from anybody, which is why they stay in the denominator above rather
+than being quietly dropped.
+
 ### The ceiling, and why it is where it is
 
 **83 of the corpus's 106 partitioned tables have no partitions at all.** The
 dumps declare the parent and the application creates the partitions at runtime,
-so those tables can take no row from anybody. That is not a limit of this tool
-and no amount of reading bounds moves it. They stay in the denominator, because
-taking them out would be flattering the number rather than reporting it.
+so those tables can take no row from anybody. That is not a limit of this tool,
+and reading range bounds — the obvious remedy — is worth *three tables* across
+the whole corpus, because only three range-partitioned parents have partitions
+and go unread. `--plan` says so by name rather than implying the reader is at
+fault.
 
 Of everything still refused after the database has been asked: 90 are rows that
 land in no partition, 62 are CHECK constraints Postgres itself rejected the
@@ -296,11 +313,14 @@ What this does *not* do is make a row coherent beyond that: a `city` and a
 `country` in one row are drawn independently and may not belong together. The
 person columns are the exception, and they are the exception on purpose.
 
-Across tables, identity follows the row index, which is the same as the parent
-row a foreign key points at **until the child is asked for more rows than its
-parent has**. Fill 3 users and 7 `user_emails` and the last four addresses
-belong to people who were never written. Measured, and being fixed — see
-`docs/plan-gaps.md`.
+Across tables, identity follows the **parent row the foreign key points at**,
+where a table has one key and so one answer. Fill 3 users and 7 notes and every
+note's `author_name` is the user it references, wrapping with the key.
+
+A **unique** column is the exception, and it is arithmetic rather than a gap:
+seven distinct email addresses cannot come from three people, so
+`user_emails.email` keeps walking its own list while the name columns beside it
+follow the key. Where agreement and distinctness conflict, distinctness wins.
 
 ## Options
 

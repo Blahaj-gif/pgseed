@@ -428,6 +428,15 @@ pub fn for_each_statement(
             // Foreign keys first: a column covered by one is drawn from the
             // parent's pool, never generated, or it would point at nothing.
             let mut from_parent: BTreeMap<String, Literal> = BTreeMap::new();
+            // Which of the parent's rows this one is attached to, where there
+            // is one answer. The person-shaped columns read it as their
+            // identity, so a `user_emails` row carries the address of the user
+            // it points at rather than of whichever row it happens to be.
+            //
+            // Only with a single foreign key. With several there is no one
+            // parent to take an identity from, and picking one would be the
+            // kind of cleverness that produces a wrong row that looks right.
+            let mut identity = row;
             for fk in &table.foreign_keys {
                 let Some(parent_rows) = pool.get(&fk.references) else {
                     continue;
@@ -438,10 +447,29 @@ pub fn for_each_statement(
                 // One parent row per foreign key, so every column of a
                 // composite key comes from the same row.
                 let stride = strides.get(&fk.name).copied().unwrap_or(1);
-                let chosen = &parent_rows[(row / stride) % parent_rows.len()];
+                let at = (row / stride) % parent_rows.len();
+                if table.foreign_keys.len() == 1 {
+                    identity = at;
+                }
+                let chosen = &parent_rows[at];
                 for (mine, theirs) in fk.columns.iter().zip(&fk.referenced_columns) {
                     if let Some(literal) = chosen.get(theirs) {
                         from_parent.insert(mine.clone(), literal.clone());
+                    }
+                }
+            }
+
+            // The other route to a parent: a key the database generates, read
+            // back with `ORDER BY ... OFFSET (row % count)`. The pool holds
+            // nothing for those, so the identity has to be worked out from the
+            // same arithmetic the subquery uses — and this is the common case,
+            // because a serial primary key is the common case.
+            if identity == row && table.foreign_keys.len() == 1 {
+                if let Some(fk) = table.foreign_keys.first() {
+                    if let Some(n) = counts.get(&fk.references).copied().filter(|n| *n > 0) {
+                        if pool.get(&fk.references).map_or(true, Vec::is_empty) {
+                            identity = row % n;
+                        }
                     }
                 }
             }
@@ -504,13 +532,14 @@ pub fn for_each_statement(
                     // column value and a syntax error inside `ARRAY[...]`.
                     Literal::null()
                 } else {
-                    value(
+                    crate::generate::value_as(
                         options.seed,
                         id,
                         column,
                         row,
                         bounds.get(&column.name).unwrap_or(&Bounds::default()),
                         varying.get(&column.name).copied(),
+                        identity,
                     )
                 };
                 this_row.insert(column.name.clone(), literal.clone());

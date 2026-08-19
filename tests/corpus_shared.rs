@@ -211,13 +211,51 @@ pub fn shapes_the_schema(statement: &str) -> bool {
     .any(|allowed| head.starts_with(allowed))
 }
 
+/// Supply a function whose extension would not install, where that can be done
+/// exactly.
+///
+/// The Postgres `postgresql_embedded` ships has `uuid-ossp`'s control file on
+/// Linux and not its library, so `CREATE EXTENSION` fails there and succeeds
+/// here. hex.pm defaults a primary key to `uuid_generate_v4()`, so its
+/// `CREATE TABLE users` then fails and twenty constraints on that table are
+/// counted as lost — a fact about the build reported as a fact about the
+/// schema, and the corpus became twenty schemas on one machine and nineteen on
+/// another.
+///
+/// `gen_random_uuid()` has been in core since Postgres 13 and produces the same
+/// thing: a random 128-bit value with the version bits set. So the function is
+/// supplied and the extension is not.
+///
+/// **This is deliberately not a retry-whatever-failed.** Making a schema load
+/// is exactly the pressure that produces a flattering measurement, so:
+/// one named function, written out by hand, whose semantics are known; no
+/// constraint of any kind is changed; and everything else — `vector`,
+/// `pg_partman`, anything with behaviour of its own — gets nothing, and a
+/// schema needing one stays unmeasured and says so.
+pub fn shim_for(client: &mut postgres::Client, failed: &str) -> Option<&'static str> {
+    let head = failed.trim_start().to_uppercase();
+    if !head.starts_with("CREATE EXTENSION") || !head.contains("UUID-OSSP") {
+        return None;
+    }
+    // Schema-qualified because hex.pm calls it that way and Hydra does not;
+    // `public` is on the search path for the second case.
+    client
+        .batch_execute(
+            "CREATE OR REPLACE FUNCTION public.uuid_generate_v4() RETURNS uuid              LANGUAGE sql AS 'SELECT gen_random_uuid()'",
+        )
+        .ok()
+        .map(|()| "uuid-ossp")
+}
+
 pub fn load(client: &mut postgres::Client, sql: &str) -> Vec<String> {
     let schemas = schemas_in(sql);
     for name in &schemas {
         let _ = client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{name}\";"));
     }
     for statement in statements(sql).into_iter().filter(|s| shapes_the_schema(s)) {
-        let _ = client.batch_execute(&statement);
+        if client.batch_execute(&statement).is_err() {
+            shim_for(client, &statement);
+        }
     }
 
     let path: Vec<String> = schemas

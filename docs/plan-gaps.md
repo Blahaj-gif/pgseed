@@ -1,5 +1,10 @@
 # Plan: the four gaps left after publishing
 
+> **Outcome, added after doing them.** Three were built; the fourth was
+> measured and abandoned, which is the outcome it was measured for. The
+> identity fix turned out to have a limit that arithmetic imposes rather than
+> the design, and that limit is written into section 4 rather than glossed.
+
 Written from measurement rather than from the impressions in the last review,
 and one of the four turned out to be described wrongly in that review. That is
 recorded here rather than quietly corrected.
@@ -71,6 +76,10 @@ measure without it.
 **Cost:** an hour. **Effect:** twenty schemas on every platform, and one
 number instead of two.
 
+**Done.** `corpus_shared::shim_for` supplies the one function when, and only
+when, `CREATE EXTENSION "uuid-ossp"` fails, and logs `SHIMMED uuid-ossp` when
+it does.
+
 ---
 
 ## 2. GitLab at 40% — and it is triggers, not partitions
@@ -114,6 +123,17 @@ worth three tables.
 
 **Cost:** a day to measure, two to build if the measurement justifies it.
 
+**Measured, and abandoned.** Of the 267 triggers that interfere across the
+corpus, **2** assign only to columns that are nullable, in no unique key and
+named by no CHECK. The narrowing is worth two tables.
+
+That is the outcome the measurement existed to produce. The reasoning was
+sound — an assignment really does only matter if something was relying on the
+value — and the premise was wrong: these triggers assign to columns that are
+relied on, which is why they were written. 285 was the largest number in the
+corpus and it bought nothing, exactly as the partition work did. Two days
+saved by spending one afternoon first.
+
 ---
 
 ## 3. The partitioned tables that can take no row from anybody
@@ -149,6 +169,12 @@ and a `--plan` line naming partitioned tables with no partitions, since a user
 staring at a refusal deserves to know it is not about them.
 
 **Cost:** an afternoon, most of it wording.
+
+**Done.** The corpus gate prints both, and a partitioned table with nothing
+attached now refuses with *"no partitions attached — no row can land anywhere,
+so this table holds nothing until one exists"* rather than the previous
+*"cannot show a row lands in any partition"*, which read like a limitation of
+the reader.
 
 ---
 
@@ -206,6 +232,28 @@ Three constraints on the design:
 
 **Cost:** a day, including a test that fills a child deeper than its parent and
 asserts every child names the person it points at.
+
+**Done, with a limit arithmetic imposes.** A child's non-unique person columns
+now follow the parent row the key points at:
+
+```text
+  before                            after
+  note 4 -> Ada,  Bea Fairbairn     note 4 -> Ada,  Ada Adeyemi
+  note 5 -> Amara, Callum Ghosh     note 5 -> Amara, Amara Castellan
+```
+
+A **unique** column cannot be made to follow it. Seven distinct email addresses
+cannot come from three people, and where agreement and distinctness conflict
+the doctrine already says which wins. So `user_emails.email` in a table filled
+deeper than `users` still walks its own list; the name columns beside it do
+not.
+
+Closing that too would mean giving the same person several addresses —
+`ada.adeyemi@`, `ada.adeyemi-1@` — by reading the identity for the name part
+and the row's cycle for the disambiguator. It is provable and it is not free:
+the odometer would have to carry two numbers instead of one, and every unique
+person-shaped column in the corpus would change. Left undone deliberately, and
+written down so it is a decision rather than an oversight.
 
 ---
 

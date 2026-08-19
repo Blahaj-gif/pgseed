@@ -512,3 +512,51 @@ fn a_single_row_lock_table_holds_exactly_one_row() {
         .expect("Postgres accepts it");
     assert_eq!(count(&db, "stream_position"), 1);
 }
+
+#[test]
+fn a_child_deeper_than_its_parent_still_names_the_person_it_points_at() {
+    // Identity used to follow the child's own row index, which is the same
+    // number as the parent's until the foreign key wraps. Three parents and
+    // seven children gave four rows describing people who were never written.
+    let db = Db::start();
+    db.apply(
+        "CREATE TABLE users (
+             id         serial PRIMARY KEY,
+             first_name text NOT NULL,
+             last_name  text NOT NULL
+         );
+         CREATE TABLE notes (
+             id          serial PRIMARY KEY,
+             user_id     int NOT NULL REFERENCES users(id),
+             author_name text NOT NULL
+         );",
+    );
+
+    let mut client = db.client();
+    let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = graph::order(&schema);
+    let verdict = classify::classify(&schema, &order);
+    let options = emit::Options {
+        seed: 1,
+        rows: pgsow::filter::RowCounts::parse(&["3".into(), "notes=7".into()]).unwrap(),
+    };
+    let sql = emit::sql(&schema, &verdict, &options);
+    db.client()
+        .batch_execute(&sql)
+        .expect("Postgres accepts it");
+
+    let mismatched: i64 = db
+        .client()
+        .query_one(
+            "SELECT count(*) FROM notes n JOIN users u ON u.id = n.user_id
+               WHERE n.author_name <> u.first_name || ' ' || u.last_name",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(count(&db, "notes"), 7);
+    assert_eq!(
+        mismatched, 0,
+        "a note named somebody other than the user it points at"
+    );
+}

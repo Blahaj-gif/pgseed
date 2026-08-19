@@ -518,6 +518,20 @@ pub fn read(client: &mut Client, schemas: &[String]) -> Result<Schema, postgres:
                     definition: format!("CHECK (({column} = ANY (ARRAY[{}])))", values.join(", ")),
                 });
             }
+            crate::partitions::Routing::Unknown if bounds.is_empty() => {
+                // Not "this could not be read": there is nothing to read. A
+                // partitioned table with no partitions attached takes no row
+                // from anybody, and a reader staring at the refusal deserves
+                // to know it is not about them or about this tool. GitLab
+                // declares 101 such parents and creates the partitions at
+                // runtime; 83 of the corpus's 106 are like this.
+                table.checks.push(CheckConstraint {
+                    name: format!("{}:partitions", id.name),
+                    definition: format!(
+                        "PARTITION BY {key} with no partitions attached — no row can                          land anywhere, so this table holds nothing until one exists"
+                    ),
+                });
+            }
             crate::partitions::Routing::Unknown => {
                 table.checks.push(CheckConstraint {
                     name: format!("{}:partitions", id.name),

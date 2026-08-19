@@ -333,6 +333,35 @@ pub fn value(
     bounds: &Bounds,
     variation: Option<usize>,
 ) -> Literal {
+    value_as(seed, table, column, row, bounds, variation, row)
+}
+
+/// The same, told which row's identity this one borrows.
+///
+/// `identity` is the odometer position the person-shaped columns read, and it
+/// is the row index unless the caller knows better. The caller who knows
+/// better is the emitter: a child row points at a particular parent row, and
+/// its `first_name` ought to be that parent's.
+///
+/// The two agree while the child's index is below its parent's row count and
+/// part company the moment the foreign key wraps. Three users and seven
+/// `user_emails` used to give four addresses belonging to people who were
+/// never written.
+///
+/// This does not touch the per-cell stream, which is still keyed on the row —
+/// so a value's independence from its neighbours, and every determinism
+/// property tested here, is unchanged. And it cannot affect distinctness: a
+/// column under a unique key is driven by its `step`, never by this.
+#[allow(clippy::too_many_arguments)]
+pub fn value_as(
+    seed: u64,
+    table: &TableId,
+    column: &Column,
+    row: usize,
+    bounds: &Bounds,
+    variation: Option<usize>,
+    identity: usize,
+) -> Literal {
     if bounds.must_be_null {
         return Literal::null();
     }
@@ -363,20 +392,24 @@ pub fn value(
     let noun = nouns::of_in(&table.name, &column.name);
     // And, for a number, whatever its name says about the size of it.
     let range = nouns::numeric_range(&column.name);
-    render(&mut rng, &column.type_, row, step, bounds, noun, range)
+    render(&mut rng, &column.type_, identity, step, bounds, noun, range)
 }
 
 fn render(
     rng: &mut ChaCha8Rng,
     type_: &ColumnType,
-    row: usize,
+    // The odometer position the person-shaped nouns read, and the fallback
+    // step for the branches that only consult it when a value has to be
+    // distinct. Usually the row index; the row a foreign key points at when
+    // the emitter knows which one that is.
+    identity: usize,
     step: Option<usize>,
     bounds: &Bounds,
     noun: Option<Noun>,
     range: Option<(i64, i64)>,
 ) -> Literal {
     let unique = step.is_some();
-    let step = step.unwrap_or(row);
+    let step = step.unwrap_or(identity);
     match type_ {
         // Two values, so a unique column walks them rather than rolling: two
         // rolls of a coin agree half the time, and the row count is capped at
@@ -499,7 +532,7 @@ fn render(
                     noun,
                     rng,
                     step_of(unique, step),
-                    row,
+                    identity,
                     limit.map(|l| l.max(0) as usize),
                 )
             });
@@ -712,9 +745,15 @@ fn render(
             }
         }
 
-        ColumnType::Domain { inner, .. } => {
-            render(rng, inner, row, step_of(unique, step), bounds, noun, range)
-        }
+        ColumnType::Domain { inner, .. } => render(
+            rng,
+            inner,
+            identity,
+            step_of(unique, step),
+            bounds,
+            noun,
+            range,
+        ),
 
         // One element is enough to be a valid array, and a longer one only
         // makes a failure harder to read.
@@ -725,7 +764,15 @@ fn render(
             // nine real schemas. Where the element type has no unambiguous
             // name to write, the array goes out uncast as before rather than
             // naming a type that might belong to another schema.
-            let Literal(inner) = render(rng, of, row, step_of(unique, step), bounds, noun, range);
+            let Literal(inner) = render(
+                rng,
+                of,
+                identity,
+                step_of(unique, step),
+                bounds,
+                noun,
+                range,
+            );
             match of.sql_name() {
                 Some(name) => Literal(format!("ARRAY[{inner}]::{name}[]")),
                 None => Literal(format!("ARRAY[{inner}]")),
