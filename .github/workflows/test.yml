@@ -44,7 +44,7 @@ jobs:
       - run: cargo test --test oracle --test introspection --test cli -- --test-threads=1
 
   corpus:
-    name: eighteen real schemas
+    name: twenty real schemas
     # Not on pull requests: it fetches several megabytes from other people's
     # repositories, and a fork's token cannot do that.
     if: github.event_name != 'pull_request'

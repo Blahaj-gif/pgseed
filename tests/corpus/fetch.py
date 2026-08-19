@@ -26,6 +26,14 @@ AGENT = "pgsow-corpus/0.1 (https://github.com/Blahaj-gif/pgsow)"
 API = "https://api.github.com/repos/{repo}/contents/{path}"
 
 
+# Every schema is pinned to a commit. It used to be fetched from whatever a
+# branch pointed at, which meant CI and a laptop measured different corpora and
+# the difference showed up as a schema mysteriously losing nineteen more
+# constraints on one machine than the other. A benchmark that changes under you
+# is not a benchmark, and the numbers in the README are only worth printing if
+# somebody else can get them. Moving a pin is a commit anybody can review.
+
+
 def get(url, accept=None):
     headers = {"User-Agent": AGENT}
     if accept:
@@ -41,9 +49,12 @@ def get(url, accept=None):
         return response.read()
 
 
-def listing(repo, path):
+def listing(repo, path, ref=None):
     """One directory, as (name, type, download_url) sorted by name."""
-    entries = json.loads(get(API.format(repo=repo, path=path), "application/vnd.github+json"))
+    url = API.format(repo=repo, path=path)
+    if ref:
+        url += f"?ref={ref}"
+    entries = json.loads(get(url, "application/vnd.github+json"))
     return sorted(
         (e["name"], e["type"], e.get("download_url")) for e in entries
     )
@@ -52,6 +63,7 @@ def listing(repo, path):
 def fetch_directory(schema):
     """Concatenate every matching file in a migrations directory."""
     repo, path = schema["repo"], schema["path"]
+    ref = schema.get("ref")
     suffix = schema.get("suffix", ".sql")
     # Projects that keep one file per dialect often name the shared one plainly
     # and the others `.cockroach.up.sql`, `.mysql.up.sql`. The suffix alone
@@ -59,14 +71,14 @@ def fetch_directory(schema):
     excluded = schema.get("exclude", [])
     keep = lambda name: name.endswith(suffix) and not any(x in name for x in excluded)
     parts = []
-    for name, kind, url in listing(repo, path):
+    for name, kind, url in listing(repo, path, ref):
         if kind == "dir":
             # One level down, for projects that give each migration its own
             # folder. Not recursive beyond that: nothing needs it, and a
             # runaway walk of a large repository is a poor way to find out.
             if not schema.get("nested"):
                 continue
-            for inner_name, inner_kind, inner_url in listing(repo, f"{path}/{name}"):
+            for inner_name, inner_kind, inner_url in listing(repo, f"{path}/{name}", ref):
                 if inner_kind == "file" and keep(inner_name):
                     parts.append((f"{name}/{inner_name}", inner_url))
         elif keep(name):
