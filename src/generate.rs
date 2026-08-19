@@ -705,11 +705,19 @@ fn render(
         ColumnType::Network { kind } => {
             use crate::schema::NetworkKind;
             Literal::text(&match kind {
+                // One radix for every octet, or the digits do not carry
+                // together and the number repeats. This counted the low octet
+                // modulo 254 and the one above it modulo 256, so step 0 and
+                // step 254 were both `10.0.0.1` — which Discourse's unique
+                // index on `screened_ip_addresses.ip_address` found at a
+                // thousand rows and never at fifty. An `inet` is an address
+                // rather than a network, so `.0` and `.255` are both ordinary
+                // values and the full byte is available.
                 NetworkKind::Inet if unique => format!(
                     "10.{}.{}.{}",
                     (step / 65_536) % 256,
                     (step / 256) % 256,
-                    (step % 254) + 1
+                    step % 256
                 ),
                 NetworkKind::Inet => format!(
                     "10.{}.{}.{}",
@@ -719,6 +727,21 @@ fn render(
                 ),
                 // A cidr must have zeroes in the host part or Postgres rejects
                 // it outright, which /24 on a .0 address guarantees.
+                // Both of these ignored `unique` entirely and drew from the
+                // stream, so two rows under a unique index collided whenever
+                // the stream happened to repeat. Same fault as the octets
+                // above, found by reading rather than by a failure: no corpus
+                // schema has a unique cidr or macaddr column, so nothing would
+                // have caught it until somebody's did.
+                NetworkKind::Cidr if unique => {
+                    format!("10.{}.{}.0/24", (step / 256) % 256, step % 256)
+                }
+                NetworkKind::MacAddr if unique => format!(
+                    "08:00:2b:{:02x}:{:02x}:{:02x}",
+                    (step / 65_536) % 256,
+                    (step / 256) % 256,
+                    step % 256
+                ),
                 NetworkKind::Cidr => format!(
                     "10.{}.{}.0/24",
                     rng.gen_range(0..256),
@@ -1024,6 +1047,23 @@ mod tests {
         for row in 0..200 {
             let v = value(1, &table_id(), &c, row, &Bounds::default(), Some(1));
             assert!(seen.insert(v.0.clone()), "{:?} appeared twice", v);
+        }
+    }
+
+    /// Past the point where each octet carries, which is where a mixed radix
+    /// shows up and nowhere earlier. `10.0.0.1` came out at step 0 and again
+    /// at step 254, and a corpus run at fifty rows could never have seen it.
+    #[test]
+    fn a_unique_network_column_does_not_repeat_across_a_carry() {
+        use crate::schema::NetworkKind;
+        for kind in [NetworkKind::Inet, NetworkKind::Cidr, NetworkKind::MacAddr] {
+            let named = format!("{kind:?}");
+            let c = column("addr", ColumnType::Network { kind });
+            let mut seen = std::collections::BTreeSet::new();
+            for row in 0..2_000 {
+                let v = value(1, &table_id(), &c, row, &Bounds::default(), Some(1));
+                assert!(seen.insert(v.0.clone()), "{named}: {:?} appeared twice", v);
+            }
         }
     }
 

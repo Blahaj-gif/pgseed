@@ -1,7 +1,7 @@
 //! Three things that are only worth knowing if they are known at the edges.
 //!
 //! The corpus measures *reach* on schemas nobody here wrote, which is the
-//! honest number and a blunt one: a construct appearing twice in twenty
+//! honest number and a blunt one: a construct appearing twice in the
 //! schemas is one schema away from being untested, and a construct appearing
 //! never is tested only by DDL this project wrote. These are the deliberate
 //! exception. They are hand-written on purpose, and they earn it by testing

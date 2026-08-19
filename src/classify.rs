@@ -16,7 +16,7 @@
 //! passed.
 
 use crate::graph::Order;
-use crate::schema::{Schema, Table, TableId};
+use crate::schema::{ForeignKey, Schema, Table, TableId};
 
 /// Why a table will not be filled. Each carries enough to print a line a
 /// person can act on, which usually means naming the constraint they would
@@ -34,6 +34,12 @@ pub enum Refusal {
     DependsOnRefused { table: TableId, constraint: String },
     /// Two unique keys that share a column and cannot both be enumerated.
     UnsatisfiableKeys { first: String, second: String },
+    /// Two foreign keys that share a column and would disagree about its value.
+    EntangledForeignKeys {
+        first: String,
+        second: String,
+        column: String,
+    },
     /// A required column points at a table that was never read — in a schema
     /// that was not asked for, or of a kind introspection skips. Whether it
     /// holds any rows to point at is not knowable from here.
@@ -58,6 +64,13 @@ impl Refusal {
             ),
             Refusal::UnsatisfiableKeys { first, second } => format!(
                 "unique keys \"{first}\" and \"{second}\" share a column with no room to spare, so this cannot make both distinct at once"
+            ),
+            Refusal::EntangledForeignKeys {
+                first,
+                second,
+                column,
+            } => format!(
+                "foreign keys \"{first}\" and \"{second}\" both write \"{column}\", so one of them would end up half from one parent row and half from another — a pair neither parent ever held, which this cannot show is satisfied"
             ),
             Refusal::DependsOnUnread { table, constraint } => format!(
                 "foreign key \"{constraint}\" requires {table}, which was not read — \
@@ -126,7 +139,7 @@ fn ceiling_for(table: &Table, column: &crate::schema::Column) -> Option<i32> {
 
 /// Reasons a table cannot be filled *on its own terms*, before anything about
 /// what it depends on is considered.
-fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
+fn direct_refusals(table: &Table, schema: &Schema, order: &Order) -> Vec<Refusal> {
     let mut out = Vec::new();
 
     // A CHECK is read and matched against a closed set of exact shapes. Two
@@ -277,6 +290,22 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
         out.push(Refusal::UnsatisfiableKeys { first, second });
     }
 
+    // Two foreign keys sharing a column. A composite key is drawn one whole
+    // parent row at a time, so all of its columns come from that row and the
+    // pair provably exists. Two keys sharing a column break exactly that: the
+    // second writes the shared column over the first, and the first is left
+    // half from one parent row and half from another — a pair neither parent
+    // ever held. Postgres said so on Langfuse's `in_app_agent_runs`, which is
+    // how this was found, and a row the database refuses is a row this should
+    // have refused first.
+    if let Some((first, second, column)) = entangled_foreign_keys(table, schema) {
+        out.push(Refusal::EntangledForeignKeys {
+            first,
+            second,
+            column,
+        });
+    }
+
     if let Some(reason) = order.reason_for(&table.id) {
         out.push(Refusal::UnbreakableCycle {
             reason: reason.to_string(),
@@ -284,6 +313,81 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
     }
 
     out
+}
+
+/// Two foreign keys that share a column, and the column they disagree over.
+///
+/// The same constraint written twice is not a disagreement: identical columns
+/// pointing at identical columns of the same table cannot pull in two
+/// directions, so those are passed over rather than refused.
+///
+/// This could be narrowed. Where one key's columns are a subset of another's
+/// and the wider key's parent carries a foreign key of its own covering the
+/// shared column and pointing at the same place, taking both from the wider
+/// parent is provably consistent — the value came out of that parent's pool
+/// in the first place. That is a real static check and it is not written,
+/// because this shape is 27 tables in 2,586 and the last two levers of that
+/// size in this project were worth two tables and three. Written down so it is
+/// a decision rather than an oversight.
+fn entangled_foreign_keys(table: &Table, schema: &Schema) -> Option<(String, String, String)> {
+    for (index, first) in table.foreign_keys.iter().enumerate() {
+        for second in &table.foreign_keys[index + 1..] {
+            let duplicate = first.columns == second.columns
+                && first.references == second.references
+                && first.referenced_columns == second.referenced_columns;
+            if duplicate || supplied_by(first, second, schema) || supplied_by(second, first, schema)
+            {
+                continue;
+            }
+            if let Some(column) = first.columns.iter().find(|c| second.columns.contains(c)) {
+                return Some((first.name.clone(), second.name.clone(), column.clone()));
+            }
+        }
+    }
+    None
+}
+
+/// Whether taking `narrow`'s columns from `wide`'s parent row satisfies
+/// `narrow` too — provably, not probably.
+///
+/// This is the multi-tenant shape, and it is most of what real SaaS schemas
+/// look like. Zitadel's `projects` carries both `(instance_id) -> instances(id)`
+/// and `(instance_id, org_id) -> organizations(instance_id, id)`, and the two
+/// keys share `instance_id`. Drawing them independently is what produced a
+/// pair no parent held; drawing both from the organization row is *correct*,
+/// and here is why: `organizations.instance_id` is itself a foreign key to
+/// `instances.id`, so the value in that row came out of the instances pool
+/// and satisfies the narrow key by construction.
+///
+/// So the condition is exactly that. Every column of `narrow` must appear in
+/// `wide`, and the parent of `wide` must carry one foreign key that maps the
+/// corresponding columns onto the same table and the same columns `narrow`
+/// points at. One key rather than several, because `narrow` needs its columns
+/// to have come from a single row over there, which is the same reason a
+/// composite key is drawn one parent row at a time in the first place.
+fn supplied_by(narrow: &ForeignKey, wide: &ForeignKey, schema: &Schema) -> bool {
+    if narrow.columns.len() > wide.columns.len() {
+        return false;
+    }
+    let Some(parent) = schema.tables.get(&wide.references) else {
+        return false;
+    };
+    // Where each of `narrow`'s columns lands in `wide`'s parent.
+    let mut over_there = Vec::with_capacity(narrow.columns.len());
+    for mine in &narrow.columns {
+        let Some(at) = wide.columns.iter().position(|c| c == mine) else {
+            return false;
+        };
+        let Some(theirs) = wide.referenced_columns.get(at) else {
+            return false;
+        };
+        over_there.push(theirs.clone());
+    }
+    parent.foreign_keys.iter().any(|onward| {
+        onward.references == narrow.references
+            && onward.columns == over_there
+            && onward.referenced_columns == narrow.referenced_columns
+    })
 }
 
 /// Where an at-least-one-non-null group has no column that can hold a value.
@@ -356,7 +460,7 @@ pub fn classify(schema: &Schema, order: &Order) -> Verdict {
     let mut refusals: Vec<(TableId, Vec<Refusal>)> = Vec::new();
 
     for (id, table) in &schema.tables {
-        let found = direct_refusals(table, order);
+        let found = direct_refusals(table, schema, order);
         if !found.is_empty() {
             refusals.push((id.clone(), found));
         }

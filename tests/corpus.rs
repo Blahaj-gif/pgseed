@@ -144,6 +144,7 @@ impl Coverage {
 }
 
 fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
+    let verbose = !std::env::var("PGSOW_ONLY").unwrap_or_default().is_empty();
     let Ok(sql) = std::fs::read_to_string(path) else {
         eprintln!("  {name}: not fetched, skipping");
         return None;
@@ -180,7 +181,7 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
             Ok(()) => applied += 1,
             Err(e) => {
                 skipped += 1;
-                if skipped <= 4 {
+                if skipped <= 4 || verbose {
                     let why = e
                         .as_db_error()
                         .map_or_else(|| e.to_string(), |d| d.message().into());
@@ -204,7 +205,7 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
                 // look fillable when the real one might not be. That is the
                 // number that would flatter this measurement, so it is the one
                 // reported.
-                let head = statement.trim_start().to_uppercase();
+                let head = corpus_shared::head_of(&statement);
                 // A failed unique index is exactly the same loss as a failed
                 // unique constraint, and until indexes were applied at all
                 // this could not have counted one. Leaving it out now would be
@@ -237,11 +238,39 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
                         missing_extensions.push(named);
                     }
                 }
-                let lost = (head.starts_with("ALTER TABLE") && head.contains("CONSTRAINT"))
-                    || head.starts_with("CREATE UNIQUE INDEX");
+                // ...unless the statement cost the live schema nothing, and
+                // two kinds of failure cost it nothing at all.
+                //
+                // **Already exists.** `shapes_the_schema` keeps CREATE and
+                // drops DROP, so a migration set that drops an index and
+                // rebuilds it under the same name replays as CREATE, CREATE.
+                // The second fails, and the constraint is *present* — put
+                // there by the first. Counting that as a loss says a table is
+                // less constrained than it is, which is the opposite of what
+                // this number exists to catch.
+                //
+                // **The relation is not there.** A constraint on a table that
+                // failed to create cannot flatter anything: the table never
+                // enters the denominator. This was always true and was
+                // written in the comment below before it was true in the code.
+                //
+                // Everything else still counts, including a constraint naming
+                // a column the replay never built — there the table *is* in
+                // the denominator and really is shaped differently.
+                let harmless = e.as_db_error().is_some_and(|d| {
+                    matches!(
+                        d.code(),
+                        &postgres::error::SqlState::DUPLICATE_TABLE
+                            | &postgres::error::SqlState::DUPLICATE_OBJECT
+                            | &postgres::error::SqlState::UNDEFINED_TABLE
+                    )
+                });
+                let lost = !harmless
+                    && ((head.starts_with("ALTER TABLE") && head.contains("CONSTRAINT"))
+                        || head.starts_with("CREATE UNIQUE INDEX"));
                 if lost {
                     lost_constraints += 1;
-                    if lost_constraints <= 3 {
+                    if lost_constraints <= 3 || verbose {
                         let why = e
                             .as_db_error()
                             .map_or_else(|| e.to_string(), |d| d.message().into());
@@ -315,6 +344,7 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
                 pgsow::classify::Refusal::DependsOnRefused { .. } => inherited += 1,
                 pgsow::classify::Refusal::DependsOnUnread { .. } => unread += 1,
                 pgsow::classify::Refusal::UnsatisfiableKeys { .. } => keys += 1,
+                pgsow::classify::Refusal::EntangledForeignKeys { .. } => keys += 1,
             }
         }
     }
@@ -523,7 +553,16 @@ fn reach_against_real_schemas() {
     println!("\nreach on schemas this project did not write:");
     let mut covered = [0usize; 13];
     let mut schemas = 0usize;
+    // One schema at a time when something needs looking at. The whole corpus
+    // is four minutes and a diagnosis rarely needs all of it, so
+    // `PGSOW_ONLY=langfuse cargo test --test corpus` runs one — and, since the
+    // point is then diagnosis rather than a number, prints every failure
+    // instead of the first few. `probe` has had this for the same reason.
+    let only = std::env::var("PGSOW_ONLY").unwrap_or_default();
     for source in corpus_shared::sources() {
+        if !only.is_empty() && !only.split(',').any(|want| want == source.name) {
+            continue;
+        }
         let Some(coverage) = measure(
             &source.name,
             &Path::new("tests/corpus").join(&source.file),
@@ -563,7 +602,7 @@ fn reach_against_real_schemas() {
     // without being on this list fails the test.
     const KNOWN_ABSENT: [(&str, &str); 1] = [(
         "domain type",
-        "PostgREST defines seven domains and uses them in functions and casts,          never as the type of a table column. Nothing in twenty real schemas          has a domain-typed column, so `ColumnType::Domain` is exercised only          by the oracle tests.",
+        "PostgREST defines seven domains and uses them in functions and casts,          never as the type of a table column. Nothing in the corpus          has a domain-typed column, so `ColumnType::Domain` is exercised only          by the oracle tests.",
     )];
 
     let unexpected: Vec<&str> = Coverage::NAMES
@@ -604,26 +643,11 @@ fn reach_against_real_schemas() {
 #[ignore]
 fn survey_the_checks_this_does_not_understand() {
     let (mut total, mut known) = (0usize, 0usize);
-    for name in [
-        "powerdns",
-        "hasura",
-        "kong",
-        "harbor",
-        "temporal",
-        "postgrest",
-        "synapse",
-        "discourse",
-        "gitlab",
-        "lago",
-        "sourcegraph",
-        "sourcegraph_codeintel",
-        "sourcegraph_insights",
-        "plausible",
-        "hexpm",
-        "mattermost",
-        "vaultwarden",
-        "kratos",
-    ] {
+    // From the manifest, not from a list beside it. This one had drifted to
+    // eighteen of the twenty-four and nobody noticed, so the schemas it left
+    // out were the ones whose CHECK constraints nothing had ever looked at.
+    for source in corpus_shared::sources() {
+        let name = &source.name;
         let path = Path::new("tests/corpus").join(format!("{name}.sql"));
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -637,10 +661,8 @@ fn survey_the_checks_this_does_not_understand() {
         for table in schema.tables.values() {
             for check in &table.checks {
                 total += 1;
-                if matches!(
-                    pgsow::checks::interpret(&check.definition),
-                    pgsow::checks::Meaning::Unknown
-                ) {
+                let read = pgsow::checks::interpret_all(&check.definition);
+                if read.contains(&pgsow::checks::Meaning::Unknown) {
                     println!(
                         "UNKNOWN\t{name}\t{}\t{}",
                         table.id,
@@ -742,5 +764,114 @@ fn volume_and_whether_copy_could_carry_it() {
                 statements.len(),
             );
         }
+    }
+}
+
+/// How many tables carry foreign keys that share a column, and would therefore
+/// need two parents to agree.
+///
+/// Measured before the emitter was taught to make them agree, because the
+/// largest number in this corpus has twice now been the one worth nothing.
+/// Run with `cargo test --test corpus -- --ignored --nocapture overlapping`.
+#[test]
+#[ignore]
+fn survey_overlapping_foreign_keys() {
+    let (mut tables_total, mut tables_overlapping) = (0usize, 0usize);
+    for source in corpus_shared::sources() {
+        let path = Path::new("tests/corpus").join(&source.file);
+        let Ok(sql) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let db = Db::start();
+        let mut client = db.client();
+        let schemas = corpus_shared::load(&mut client, &sql);
+        let Ok(read) = pgsow::introspect::read(&mut client, &schemas) else {
+            continue;
+        };
+        let mut here = 0usize;
+        for table in read.tables.values() {
+            tables_total += 1;
+            let overlaps = table.foreign_keys.iter().enumerate().any(|(i, a)| {
+                table.foreign_keys[i + 1..]
+                    .iter()
+                    .any(|b| a.columns.iter().any(|c| b.columns.contains(c)))
+            });
+            if overlaps {
+                here += 1;
+            }
+        }
+        tables_overlapping += here;
+        if here > 0 {
+            println!("  {:<24} {here} tables", source.name);
+        }
+    }
+    println!(
+        "\n  {tables_overlapping} of {tables_total} tables have foreign keys that share a column"
+    );
+}
+
+/// The four numbers the README's speed table prints, measured by the path a
+/// user actually runs.
+///
+/// They used to come from an ad-hoc timing nobody could repeat, and the
+/// `volume` benchmark beside this one measures something else: it collects
+/// every statement into a vector, where the CLI streams them one at a time and
+/// never holds the whole thing. Two different numbers, and the README was
+/// quoting neither.
+///
+/// `cargo test --release --test corpus -- --ignored --nocapture readme_speed`
+#[test]
+#[ignore]
+fn readme_speed() {
+    // Generation only, streamed, exactly as `--out` does it.
+    let time_it = |schema: &pgsow::schema::Schema,
+                   verdict: &pgsow::classify::Verdict,
+                   rows: usize|
+     -> (std::time::Duration, usize, usize) {
+        let options = pgsow::emit::Options::flat(1, rows);
+        let (mut bytes, mut count) = (0usize, 0usize);
+        let started = std::time::Instant::now();
+        pgsow::emit::for_each_statement(schema, verdict, &options, &mut |written| {
+            bytes += written.sql.len();
+            count += 1;
+            pgsow::emit::Took::Kept
+        });
+        (started.elapsed(), bytes, count)
+    };
+
+    let read = |sql: &str, db: &Db| {
+        let mut client = db.client();
+        let schemas = corpus_shared::load(&mut client, sql);
+        let schema = pgsow::introspect::read(&mut client, &schemas).expect("a readable schema");
+        let order = pgsow::graph::order(&schema);
+        let verdict = pgsow::classify::classify(&schema, &order);
+        (schema, verdict)
+    };
+
+    println!("\n  what the README's speed table should say:");
+
+    let fixture = std::fs::read_to_string("tests/speed.sql").expect("the fixture");
+    let db = Db::start();
+    let (schema, verdict) = read(&fixture, &db);
+    let (took, bytes, _) = time_it(&schema, &verdict, 50);
+    println!(
+        "    {} tables, 50 rows each        {took:?}  {} KB",
+        schema.len(),
+        bytes / 1024
+    );
+    drop(db);
+
+    for (name, rows) in [("gitlab", 50usize), ("gitlab", 1000), ("discourse", 100)] {
+        let path = Path::new("tests/corpus").join(format!("{name}.sql"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let db = Db::start();
+        let (schema, verdict) = read(&text, &db);
+        let (took, bytes, count) = time_it(&schema, &verdict, rows);
+        println!(
+            "    {name}, {rows} rows each          {took:?}  {} MB  ({count} statements)",
+            bytes / 1_048_576
+        );
     }
 }

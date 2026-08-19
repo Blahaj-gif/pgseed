@@ -47,7 +47,7 @@ The same seed always produces the same bytes, so this diffs cleanly.
 
 **Fill more of the database.** With `--probe`, every table pgsow refused is
 offered to the database behind a savepoint and kept if it is accepted. Reach
-goes from 65% to 88% on real schemas:
+goes from 67% to 88% on real schemas:
 
 ```
 pgsow --dsn "$DATABASE_URL" --apply --truncate --probe
@@ -128,19 +128,24 @@ and anything outside it refuses. Details and the full list:
 
 ## How well it works
 
-Twenty schemas taken from real open-source projects — 2,354 tables — generated
-for, applied to a real Postgres, and **not one row rejected**. The gate is
-zero, not a percentage, because the database is the judge.
+Twenty-four schemas taken from real open-source projects — 2,586 tables —
+generated for, applied to a real Postgres, and **not one row rejected**. The
+gate is zero, not a percentage, because the database is the judge.
 
 |  | by reasoning | with `--probe` |
 |---|---:|---:|
-| of every table in the corpus | 64.9% | **87.7%** |
-| of the tables that can hold a row | 67.7% | **91.6%** |
+| of every table in the corpus | 66.6% | **88.1%** |
+| of the tables that can hold a row | 69.3% | **91.6%** |
 
 Both are shown because they answer different questions. The second excludes
 **100 tables that can hold no row from anybody**: 83 partitioned tables whose
 dumps declare the parent and create the partitions at runtime, and 17 more
 downstream of one.
+
+The schemas are chosen for spread rather than for count. Rails, Ecto, Prisma,
+Diesel, Java/MyBatis, Go migrations and hand-written SQL are all here, because
+every generator emits differently shaped DDL and a corpus of one ecosystem
+measures agreement with that ecosystem rather than accuracy.
 
 <details>
 <summary>Per schema</summary>
@@ -152,26 +157,31 @@ downstream of one.
 | Kong | 9 | 100% | 100% |
 | Sourcegraph *(codeintel)* | 13 | 77% | 92% |
 | listmonk | 16 | 100% | 100% |
-| Ory Hydra | 18 | 83% | 94% |
+| Ory Hydra | 19 | 84% | 100% |
 | Harbor | 21 | 100% | 100% |
 | Sourcegraph *(insights)* | 21 | 81% | 95% |
-| Ory Kratos | 23 | 100% | 100% |
 | Vaultwarden | 29 | 100% | 100% |
+| Zitadel *(v3)* | 30 | 17% | 37% |
+| Ory Kratos | 31 | 94% | 97% |
 | hex.pm | 36 | 61% | 100% |
 | Temporal | 37 | 100% | 100% |
 | Plausible | 41 | 44% | 100% |
-| Mattermost | 80 | 94% | 100% |
+| Camunda 7 | 49 | 98% | 100% |
+| Documenso | 61 | 100% | 100% |
+| Langfuse | 81 | 91% | 100% |
+| Mattermost | 82 | 94% | 100% |
 | Synapse | 134 | 99% | 99% |
 | PostgREST *(test fixtures)* | 134 | 96% | 98% |
 | Lago | 138 | 83% | 98% |
 | Sourcegraph *(frontend)* | 180 | 43% | 83% |
-| Discourse | 351 | 97% | 99% |
+| Discourse | 352 | 97% | 99% |
 | GitLab | 1,057 | 40% | 77% |
-| **total** | **2,354** | **64.9%** | **87.7%** |
+| **total** | **2,586** | **66.6%** | **88.1%** |
 
-Measured twice on separate runs, byte-identical both times, and identical on
-Linux and Windows. Every schema is pinned to a commit, so the numbers are
-reproducible rather than whatever a branch pointed at that day.
+Measured twice on separate runs, identical both times. Every schema is pinned
+to a commit, so the numbers are reproducible rather than whatever a branch
+pointed at that day, and CI re-runs the whole corpus on Linux against the same
+pins.
 
 </details>
 
@@ -182,37 +192,46 @@ them with `python tests/corpus/fetch.py`.
 
 ## Speed
 
-Release build, which is what ships.
+Release build, which is what ships, timed on the streaming path `--out` uses.
 
 | | generate | SQL |
 |---|---:|---:|
-| 14 tables, 50 rows each | 28 ms | 63 KB |
-| GitLab, 50 rows each | 0.3 s | 5 MB |
-| GitLab, 1000 rows each | 4.9 s | 103 MB |
-| Discourse, 100 rows into a live database | 3.4 s | 36,433 rows |
+| 14 tables, 50 rows each | 9 ms | 66 KB |
+| Discourse, 100 rows each | 0.9 s | 3 MB |
+| GitLab, 50 rows each | 0.7 s | 6 MB |
+| GitLab, 1000 rows each | 16 s | 125 MB |
 
 The SQL is streamed one statement at a time, so a large schema at a large row
 count is a question of patience rather than of memory.
+
+These come from `cargo test --release --test corpus -- --ignored readme_speed`,
+so they are numbers anybody can reproduce rather than a timing taken once. With
+`--apply` the cost is the database's rather than this tool's: writing
+Discourse's 343 statements takes about 2.5 s on top of generating them.
 
 ## What the data looks like
 
 Column names are read the same way constraints are: a closed set of exact
 shapes, matched on the whole name, its last two segments, or its last one.
 `email` gets an address, `country_code` gets `SE`, `checksum` gets 64 hex
-characters, `quantity` gets a number between 1 and 20.
+characters, `quantity` gets a number between 1 and 20. A camel hump counts as
+a word boundary, so Prisma's `twoFactorSecret` reaches the same noun as
+everybody else's `two_factor_secret`.
 
 - **Columns in one row describe the same person.** `first_name`, `last_name`
   and `email` are three readings of one number, so they agree by construction.
 - **Rows in a child table describe the parent they point at.** Fill 3 users and
   7 notes and every note names the user it references.
 - **Nothing generated can reach anybody.** Addresses use the RFC 2606 reserved
-  domains, phone numbers the 555-01xx block, IPs the RFC 5737 ranges.
+  domains, phone numbers the 555-01xx block, and IPs the RFC 5737 documentation
+  ranges — or `10.0.0.0/8` for an `inet` or `cidr` column, which needs more
+  addresses than those hold. Neither routes anywhere.
 - **Unique columns stay unique.** Where being distinct and being coherent
   conflict, distinct wins — seven email addresses cannot come from three
   people.
 
-Which names to cover was counted, not guessed: 5,509 text columns across the
-corpus, of which 77% land on a known noun. The rest get an ordinary word and no
+Which names to cover was counted, not guessed: 6,901 text columns across the
+corpus, of which 79% land on a known noun. The rest get an ordinary word and no
 claim.
 
 ## Testing

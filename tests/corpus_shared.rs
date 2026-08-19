@@ -168,7 +168,7 @@ fn next_semicolon(text: &str, quoted: &mut bool) -> Option<usize> {
 
 /// Load a schema dump, and leave the session the way a real one would be.
 ///
-/// Four of the twenty corpus files are `pg_dump` output, and `pg_dump` writes
+/// Four of the corpus files are `pg_dump` output, and `pg_dump` writes
 /// `SELECT pg_catalog.set_config('search_path', '', false)` near the top. The
 /// `false` makes it a session setting rather than a transaction one, so it
 /// outlives the load and applies to everything the test does afterwards.
@@ -191,7 +191,7 @@ fn next_semicolon(text: &str, quoted: &mut bool) -> Option<usize> {
 /// about what is in the database produce two numbers nobody can compare, which
 /// is how a two-table discrepancy went into a README.
 pub fn shapes_the_schema(statement: &str) -> bool {
-    let head = statement.trim_start().to_uppercase();
+    let head = head_of(statement);
     [
         "CREATE TABLE",
         "ALTER TABLE",
@@ -211,6 +211,28 @@ pub fn shapes_the_schema(statement: &str) -> bool {
     .any(|allowed| head.starts_with(allowed))
 }
 
+/// A statement's opening words, with any comment in front of them removed.
+///
+/// A statement does not always begin where it starts. `foo; -- a note` ends
+/// one statement at the semicolon and leaves ` -- a note` at the front of the
+/// next, so the next statement's head reads as a comment. Documenso writes
+/// exactly that — `ADD COLUMN "organisationId" TEXT; -- [CUSTOM_CHANGE] ...` —
+/// and the `ALTER TABLE "Team"` behind it was filtered out with the noise.
+/// Four constraints downstream of those columns were then counted as lost,
+/// which is a fact about this splitter reported as a fact about the schema.
+pub fn head_of(statement: &str) -> String {
+    statement
+        .lines()
+        .skip_while(|line| {
+            let trimmed = line.trim();
+            trimmed.is_empty() || trimmed.starts_with("--")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_start()
+        .to_uppercase()
+}
+
 /// Supply a function whose extension would not install, where that can be done
 /// exactly.
 ///
@@ -219,7 +241,7 @@ pub fn shapes_the_schema(statement: &str) -> bool {
 /// here. hex.pm defaults a primary key to `uuid_generate_v4()`, so its
 /// `CREATE TABLE users` then fails and twenty constraints on that table are
 /// counted as lost — a fact about the build reported as a fact about the
-/// schema, and the corpus became twenty schemas on one machine and nineteen on
+/// schema, and the corpus became one size on one machine and one fewer on
 /// another.
 ///
 /// `gen_random_uuid()` has been in core since Postgres 13 and produces the same

@@ -421,6 +421,27 @@ pub fn for_each_statement(
         // a composite key's odometer.
         let varying = crate::volume::variations(table);
 
+        // Widest key first, so a key whose columns another one already covers
+        // finds them supplied and stands aside. `classify` has already refused
+        // every table where that would not be provably right, so a key skipped
+        // below is one whose value came out of the wider key's parent and
+        // satisfies this one by construction. Drawing it again from its own
+        // parent is what wrote a pair no parent ever held.
+        //
+        // Ordered once per table rather than once per row: it depends on
+        // nothing the row loop changes, and a schema of a thousand tables at a
+        // thousand rows would otherwise sort a million times.
+        let keys = {
+            let mut keys: Vec<&crate::schema::ForeignKey> = table.foreign_keys.iter().collect();
+            keys.sort_by(|a, b| {
+                b.columns
+                    .len()
+                    .cmp(&a.columns.len())
+                    .then(a.name.cmp(&b.name))
+            });
+            keys
+        };
+
         for row in 0..rows {
             let mut values: Vec<String> = Vec::with_capacity(columns.len());
             let mut this_row: BTreeMap<String, Literal> = BTreeMap::new();
@@ -437,11 +458,14 @@ pub fn for_each_statement(
             // parent to take an identity from, and picking one would be the
             // kind of cleverness that produces a wrong row that looks right.
             let mut identity = row;
-            for fk in &table.foreign_keys {
+            for fk in &keys {
                 let Some(parent_rows) = pool.get(&fk.references) else {
                     continue;
                 };
                 if parent_rows.is_empty() {
+                    continue;
+                }
+                if fk.columns.iter().all(|c| from_parent.contains_key(c)) {
                     continue;
                 }
                 // One parent row per foreign key, so every column of a

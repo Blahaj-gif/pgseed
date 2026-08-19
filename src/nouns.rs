@@ -17,7 +17,7 @@
 //! ## Where the names came from
 //!
 //! Not from memory. `tests/columns.rs` counts every text-typed column in the
-//! twenty corpus schemas — 5,509 of them — and ranks the names. The list this
+//! corpus schemas — 6,901 of them — and ranks the names. The list this
 //! module covers is the head of that ranking:
 //!
 //! ```text
@@ -27,7 +27,7 @@
 //! ```
 //!
 //! A handful of nouns here — city, street, postal code, company — are barely
-//! in that ranking, because twenty open-source backend schemas are mostly
+//! in that ranking, because open-source backend schemas are mostly
 //! infrastructure and not a CRM. They are covered anyway, and this is the one
 //! place in the project where something is included on judgement rather than
 //! on measurement. Said out loud rather than buried.
@@ -711,7 +711,8 @@ pub fn of_in(table: &str, column: &str) -> Option<Noun> {
 }
 
 pub fn of(column: &str) -> Option<Noun> {
-    let name = column.trim_matches('_').to_ascii_lowercase();
+    let name = split_camel(column);
+    let name = name.trim_matches('_').to_ascii_lowercase();
     if let Some(noun) = exact(&name) {
         return Some(noun);
     }
@@ -733,6 +734,43 @@ pub fn of(column: &str) -> Option<Noun> {
     }
 
     tail(last)
+}
+
+/// A camel hump read as a word boundary, so one matcher serves both spellings.
+///
+/// Every schema here spelled its columns `first_name` until Documenso, which
+/// uses Prisma with no `@map` and so really does call them `"emailVerified"`
+/// and `"twoFactorSecret"`. Lowercasing those first gives `twofactorsecret`,
+/// which is in no list and never will be. Splitting the hump gives
+/// `two_factor_secret`, which the matcher below already understands — so this
+/// adds a normaliser in front of the closed set rather than a second closed
+/// set beside it.
+///
+/// A run of capitals is one word, not several: `avatarURL` becomes
+/// `avatar_URL` and not `avatar_U_R_L`, and a run followed by a lowercase
+/// letter breaks before the last capital, so `HTTPHeader` becomes
+/// `HTTP_Header`. A name that was already snake_case has no capitals in it and
+/// comes back unchanged, which is the property that matters most: this must
+/// not move any of the twenty-three schemas that were fine before.
+fn split_camel(name: &str) -> String {
+    let letters: Vec<char> = name.chars().collect();
+    let mut out = String::with_capacity(name.len() + 4);
+    for (at, &here) in letters.iter().enumerate() {
+        if at > 0 && here.is_ascii_uppercase() {
+            let before = letters[at - 1];
+            let opens_a_word = letters
+                .get(at + 1)
+                .is_some_and(|next| next.is_ascii_lowercase());
+            if before.is_ascii_lowercase()
+                || before.is_ascii_digit()
+                || (before.is_ascii_uppercase() && opens_a_word)
+            {
+                out.push('_');
+            }
+        }
+        out.push(here);
+    }
+    out
 }
 
 /// Names that only mean one thing when taken whole, including the ones written
@@ -1551,5 +1589,53 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod camel {
+    use super::*;
+
+    #[test]
+    fn a_hump_is_a_word_boundary() {
+        assert_eq!(split_camel("emailVerified"), "email_Verified");
+        assert_eq!(split_camel("twoFactorSecret"), "two_Factor_Secret");
+        assert_eq!(split_camel("address1Line"), "address1_Line");
+    }
+
+    /// The property the twenty-three schemas that came before depend on.
+    #[test]
+    fn snake_case_comes_back_untouched() {
+        for name in [
+            "first_name",
+            "user_id",
+            "content_type",
+            "email",
+            "_id_",
+            "url",
+        ] {
+            assert_eq!(split_camel(name), name);
+        }
+    }
+
+    /// A run of capitals is one word. `avatarURL` is a URL, not four letters.
+    #[test]
+    fn a_run_of_capitals_stays_whole() {
+        assert_eq!(split_camel("avatarURL"), "avatar_URL");
+        assert_eq!(split_camel("HTTPHeader"), "HTTP_Header");
+        assert_eq!(split_camel("ID"), "ID");
+    }
+
+    /// And the point of all of it: Prisma's spelling reaches the same nouns as
+    /// everybody else's.
+    #[test]
+    fn prisma_names_reach_the_same_nouns() {
+        assert_eq!(of("firstName"), of("first_name"));
+        assert_eq!(of("lastName"), of("last_name"));
+        assert_eq!(of("displayName"), of("display_name"));
+        assert_eq!(of("contentType"), of("content_type"));
+        assert_eq!(of("ipAddress"), of("ip_address"));
+        assert_eq!(of("countryCode"), of("country_code"));
+        assert!(of("emailVerified").is_none() || of("emailVerified") == of("email_verified"));
     }
 }

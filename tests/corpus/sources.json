@@ -1,5 +1,5 @@
 {
-  "why": "Real schemas, not written by this project. A hand-written corpus would only contain the constructs its author remembered to handle, which measures agreement rather than accuracy. The files are fetched on purpose and are not committed: they belong to their projects, and the URL is the durable part.",
+  "why": "Authored elsewhere, and every loss measured. A hand-written corpus would only contain the constructs its author remembered to handle, which measures agreement rather than accuracy — so no schema here is written by this project. The transport is not the rule: one schema arrives as SQL embedded in a Lua file, several are concatenated out of migration directories by tests/corpus/fetch.py, and the loader filters statements and supplies one hand-written function. Those are mechanical, and what they cost is counted in max_lost_constraints rather than hoped about. Generating DDL by running a project's own migration tool is permitted by that rule and is not done yet, for two practical reasons: it weakens the pin from a commit SHA to a commit plus a dependency resolution, and it means executing a third party's code in a scheduled CI job. See docs/plan-corpus-breadth.md. The files are fetched on purpose and are not committed: they belong to their projects, and the URL is the durable part.",
   "fetch": "python tests/corpus/fetch.py  (set GITHUB_TOKEN to lift the API rate limit)",
   "schemas": [
     {
@@ -59,7 +59,7 @@
       "licence": "MIT",
       "url": "https://raw.githubusercontent.com/PostgREST/postgrest/93843ad93e722936fb390778b83fa4445fb68208/test/spec/fixtures/schema.sql",
       "notes": "The most valuable one: a test fixture, so it is deliberately adversarial. Domains, composite types, odd identifiers, constraints written to be awkward.",
-      "max_lost_constraints": 2,
+      "max_lost_constraints": 0,
       "ref": "93843ad93e722936fb390778b83fa4445fb68208"
     },
     {
@@ -79,7 +79,7 @@
       "licence": "GPL-2.0",
       "url": "https://raw.githubusercontent.com/discourse/discourse/7b34a0b96376b26c19cd9a48c3ff33f9a41415d7/db/structure.sql",
       "notes": "A large Rails structure.sql.",
-      "max_lost_constraints": 3,
+      "max_lost_constraints": 0,
       "ref": "7b34a0b96376b26c19cd9a48c3ff33f9a41415d7"
     },
     {
@@ -139,7 +139,7 @@
       "licence": "AGPL-3.0",
       "url": "https://raw.githubusercontent.com/plausible/analytics/b787d17e2549bfb66621331701cb106febb67672/priv/repo/structure.sql",
       "notes": "Ecto rather than Rails or hand-written; a different generator's habits.",
-      "max_lost_constraints": 1,
+      "max_lost_constraints": 0,
       "ref": "b787d17e2549bfb66621331701cb106febb67672"
     },
     {
@@ -149,7 +149,7 @@
       "licence": "Apache-2.0",
       "url": "https://raw.githubusercontent.com/hexpm/hexpm/ab8bdbfb37d6d563a9f79c3eea7a8769573dc2c2/priv/repo/structure.sql",
       "notes": "Ecto, and a package registry — versions, checksums, wide unique keys.",
-      "max_lost_constraints": 2,
+      "max_lost_constraints": 0,
       "ref": "ab8bdbfb37d6d563a9f79c3eea7a8769573dc2c2"
     },
     {
@@ -163,7 +163,7 @@
       "suffix": ".up.sql",
       "url": "https://github.com/mattermost/mattermost/tree/master/server/channels/db/migrations/postgres",
       "notes": "A replayed migration set rather than a snapshot — the first of its kind here, and the reason the fetcher can read a directory at all.",
-      "max_lost_constraints": 3,
+      "max_lost_constraints": 0,
       "ref": "ede2edab4dabc7d5777f02ec3135197a659615ca"
     },
     {
@@ -189,11 +189,17 @@
       "kind": "directory",
       "repo": "ory/kratos",
       "path": "persistence/sql/migrations/sql",
-      "suffix": ".postgres.up.sql",
+      "suffix": ".up.sql",
       "url": "https://github.com/ory/kratos/tree/master/persistence/sql/migrations/sql",
-      "notes": "Identity management, written dialect-by-dialect — the Postgres files only.",
+      "notes": "Ory's fizz migrations: one file per dialect where the SQL differs, one shared file where it does not. Filtering on `.postgres.up.sql` looked right and silently dropped the 62 shared migrations, one of which adds a column a later constraint names — so the replay lost a foreign key and the ceiling caught it. Keep every `.up.sql` and name the dialects to drop, which is what Hydra beside it already did.",
       "max_lost_constraints": 0,
-      "ref": "b86338da04a040247a07f46100a86dcfb3875909"
+      "ref": "b86338da04a040247a07f46100a86dcfb3875909",
+      "exclude": [
+        ".cockroach.",
+        ".mysql.",
+        ".sqlite.",
+        ".sqlite3."
+      ]
     },
     {
       "name": "hydra",
@@ -211,7 +217,7 @@
       ],
       "url": "https://github.com/ory/hydra/tree/master/persistence/sql/migrations",
       "notes": "OAuth2 server. Written dialect by dialect, with the shared files named plainly — which is why the fetcher can exclude as well as match.",
-      "max_lost_constraints": 12,
+      "max_lost_constraints": 0,
       "ref": "4174065ffb052799890f7480f5360a877a67ffc1"
     },
     {
@@ -221,9 +227,72 @@
       "licence": "AGPL-3.0",
       "url": "https://raw.githubusercontent.com/knadh/listmonk/670c01717d48647093335cc23a6be6f4b79c3b6b/schema.sql",
       "notes": "A hand-written schema.sql rather than a migration set — Go, and small enough to read in one sitting.",
-      "max_lost_constraints": 3,
+      "max_lost_constraints": 0,
       "ref": "670c01717d48647093335cc23a6be6f4b79c3b6b"
+    },
+    {
+      "name": "langfuse",
+      "file": "langfuse.sql",
+      "project": "langfuse/langfuse",
+      "licence": "MIT Expat (outside ee/)",
+      "kind": "directory",
+      "repo": "langfuse/langfuse",
+      "path": "packages/shared/prisma/migrations",
+      "suffix": ".sql",
+      "nested": true,
+      "url": "https://github.com/langfuse/langfuse/tree/main/packages/shared/prisma/migrations",
+      "notes": "Prisma, and the first AI-infrastructure schema here. 432 migrations, each in its own folder — the reason the fetcher lists a tree in one call instead of walking directories. Carries 576 @map directives, so its columns end snake_case after a long chain of renames, which is a harder replay than a snapshot.",
+      "max_lost_constraints": 0,
+      "ref": "e68e201a66ac67eaeb2a6dd8f1d36295c092913f"
+    },
+    {
+      "name": "documenso",
+      "file": "documenso.sql",
+      "project": "documenso/documenso",
+      "licence": "AGPL-3.0",
+      "kind": "directory",
+      "repo": "documenso/documenso",
+      "path": "packages/prisma/migrations",
+      "suffix": ".sql",
+      "nested": true,
+      "url": "https://github.com/documenso/documenso/tree/main/packages/prisma/migrations",
+      "notes": "Prisma with no @map at all, so its columns really are \"emailVerified\" and \"avatarImageId\" — quoted camelCase, which nothing else in the corpus has. The other half of Prisma, and the reason nouns::of learned to split a camel hump.",
+      "max_lost_constraints": 0,
+      "ref": "871c2a6f0e8eadafe4ff5093938fd1a56720e9e7"
+    },
+    {
+      "name": "camunda",
+      "file": "camunda.sql",
+      "project": "camunda/camunda-bpm-platform",
+      "licence": "Apache-2.0",
+      "kind": "directory",
+      "repo": "camunda/camunda-bpm-platform",
+      "path": "engine/src/main/resources/org/camunda/bpm/engine/db/create",
+      "suffix": ".sql",
+      "contains": "postgres",
+      "url": "https://github.com/camunda/camunda-bpm-platform/tree/master/engine/src/main/resources/org/camunda/bpm/engine/db/create",
+      "notes": "Java, and the corporate shape: unquoted uppercase identifiers, varchar primary keys, no sequences. Six dialects share the folder and only one is wanted, which is why the filter here names what to keep rather than what to drop.",
+      "max_lost_constraints": 0,
+      "ref": "ee4826e5e76c2348a1510ef46a2f4ccd3b080e48"
+    },
+    {
+      "name": "zitadel",
+      "file": "zitadel.sql",
+      "project": "zitadel/zitadel",
+      "licence": "AGPL-3.0",
+      "kind": "directory",
+      "repo": "zitadel/zitadel",
+      "path": "backend/v3/storage/database/dialect/postgres/migration",
+      "suffix": "up.sql",
+      "exclude": [
+        "down.sql"
+      ],
+      "nested": true,
+      "url": "https://github.com/zitadel/zitadel/tree/main/backend/v3/storage/database/dialect/postgres/migration",
+      "notes": "A pre-release schema: this is Zitadel's v3 rewrite, so churn under the pin is expected rather than surprising. Its older cmd/setup folder looks like a migration set and is not one — those files are ALTER and INDEX patches against tables Go creates, with no CREATE TABLE among them. Dense CHECK (col <> '') and a schema of its own.",
+      "max_lost_constraints": 0,
+      "ref": "a1a4572303c513263e641a5c85fea0f76165f722"
     }
   ],
-  "ceilings": "max_lost_constraints is how many constraints this schema's replay is known to lose — measured, not assumed. The corpus test asserts it, so a change that starts dropping more fails rather than quietly scoring better for it."
+  "ceilings": "max_lost_constraints is how many constraints this schema's replay is known to lose — measured, not assumed, and re-measured whenever the harness changes. The corpus test asserts it, so a change that starts dropping more fails rather than quietly scoring better for it. Seven of these were above zero until the fetcher learned that a file boundary is a statement boundary and the counter stopped calling an already-exists failure a loss; both were harness faults being reported as facts about other people's schemas. GitLab's two are real: foreign keys the replay cannot build against a partitioned parent."
 }

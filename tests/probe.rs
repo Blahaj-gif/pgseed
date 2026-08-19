@@ -1,7 +1,7 @@
 //! What asking the database is worth, measured across the corpus.
 //!
 //! Reach by reasoning alone is 63%. This runs `probe::run` — the real thing,
-//! not a model of it — against all twenty schemas and reports what the
+//! not a model of it — against every schema in the corpus and reports what the
 //! database accepts on top of that. The number it produces is the one quoted
 //! in the README, so it is measured by the code that ships rather than by a
 //! survey that resembles it.

@@ -34,6 +34,10 @@ fn what_the_text_columns_are_called() {
     // next, and it is the one that must not be guessed at.
     let mut named = 0usize;
     let mut missed: BTreeMap<String, usize> = BTreeMap::new();
+    // What reading a camel hump as a word boundary is worth. Flattening
+    // the name first is what `nouns::of` did before Documenso arrived, so
+    // this is the same matcher denied the one thing that was added for it.
+    let mut named_flat = 0usize;
 
     for source in shared::sources() {
         let name = &source.name;
@@ -60,19 +64,34 @@ fn what_the_text_columns_are_called() {
         let Ok(rows) = client.query(sql, &[&schemas]) else {
             continue;
         };
+        // Not lowercased. Prisma without `@map` really does call a column
+        // `"emailVerified"`, and flattening that here would have hidden the
+        // one thing this survey exists to find.
+        let (mut here_total, mut here_named) = (0usize, 0usize);
         for row in &rows {
             let column: String = row.get(0);
-            let column = column.to_lowercase();
             total += 1;
+            here_total += 1;
             *whole.entry(column.clone()).or_default() += 1;
+            if pgsow::nouns::of(&column.to_lowercase()).is_some() {
+                named_flat += 1;
+            }
             if pgsow::nouns::of(&column).is_some() {
                 named += 1;
+                here_named += 1;
             } else {
                 *missed.entry(column.clone()).or_default() += 1;
             }
             let tail = column.rsplit('_').next().unwrap_or(&column).to_string();
             *last.entry(tail).or_default() += 1;
         }
+        // Per schema as well as in total, because one schema spelling its
+        // columns differently from the other twenty-three disappears into an
+        // aggregate and is the whole point of adding it.
+        println!(
+            "  {name:<24} {here_named:>5} of {here_total:>5} named ({:.0}%)",
+            100.0 * here_named as f64 / here_total.max(1) as f64
+        );
     }
 
     let mut ranked: Vec<_> = whole.iter().map(|(k, v)| (*v, k.clone())).collect();
@@ -87,6 +106,10 @@ fn what_the_text_columns_are_called() {
          The other {} are filled with an ordinary word and no claim.",
         100.0 * named as f64 / total.max(1) as f64,
         total - named
+    );
+    println!(
+        "Of those, {} are reached only by reading a camel hump as a word boundary — {named_flat} land on a noun with the name flattened first.",
+        named - named_flat
     );
     let mut unnamed: Vec<_> = missed.iter().map(|(k, v)| (*v, k.clone())).collect();
     unnamed.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
