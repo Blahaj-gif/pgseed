@@ -1,12 +1,12 @@
-# pgsow
+# pgseed
 
 Point it at a Postgres database. It reads the schema and writes data that fits
 — or tells you which table it will not touch, and which constraint stopped it.
 
 ```
-pgsow --dsn postgres://localhost/mydb --apply     # fill the database
-pgsow --dsn postgres://localhost/mydb > seed.sql  # or write a file
-pgsow --dsn postgres://localhost/mydb --plan      # or just say what it would do
+pgseed --dsn postgres://localhost/mydb --apply     # fill the database
+pgseed --dsn postgres://localhost/mydb > seed.sql  # or write a file
+pgseed --dsn postgres://localhost/mydb --plan      # or just say what it would do
 ```
 
 No config file. No codegen step. No generated client. No API key. One binary.
@@ -29,12 +29,12 @@ allowed to ask the database. Where those come from and what they exclude is in
 
 ## Install
 
-Download a binary from the [releases page](https://github.com/Blahaj-gif/pgsow/releases)
+Download a binary from the [releases page](https://github.com/Blahaj-gif/pgseed/releases)
 — Linux, macOS and Windows, each built and started by CI before it is
 published. Or build it yourself:
 
 ```
-cargo install --git https://github.com/Blahaj-gif/pgsow
+cargo install --git https://github.com/Blahaj-gif/pgseed
 ```
 
 Nothing else is needed: no Docker, no Node, no daemon, no account.
@@ -45,39 +45,39 @@ Nothing else is needed: no Docker, no Node, no daemon, no account.
 rows each, inside one transaction:
 
 ```
-pgsow --dsn "$DATABASE_URL" --apply --truncate
+pgseed --dsn "$DATABASE_URL" --apply --truncate
 ```
 
 **Make a seed file to commit.** SQL goes to stdout, the report to stderr, so
 the file contains only SQL:
 
 ```
-pgsow --dsn "$DATABASE_URL" --rows 200 > seed.sql
+pgseed --dsn "$DATABASE_URL" --rows 200 > seed.sql
 psql "$DATABASE_URL" -f seed.sql
 ```
 
 The same seed always produces the same bytes, so this diffs cleanly.
 
-**Fill more of the database.** With `--probe`, every table pgsow refused is
+**Fill more of the database.** With `--probe`, every table pgseed refused is
 offered to the database behind a savepoint and kept if it is accepted. Reach
 goes from 67% to 88% on real schemas:
 
 ```
-pgsow --dsn "$DATABASE_URL" --apply --truncate --probe
+pgseed --dsn "$DATABASE_URL" --apply --truncate --probe
 ```
 
 **Check a schema in CI.** `--plan` writes nothing and exits 1 if anything was
 refused, so a new constraint nobody can satisfy fails the build:
 
 ```
-pgsow --dsn "$DATABASE_URL" --plan || echo "something is unfillable"
+pgseed --dsn "$DATABASE_URL" --plan || echo "something is unfillable"
 ```
 
 **Point it at part of a schema.** Patterns take `*` and `?`, and `--exclude`
 wins over `--include`:
 
 ```
-pgsow --dsn "$DATABASE_URL" --apply \
+pgseed --dsn "$DATABASE_URL" --apply \
       --include 'billing_*' --exclude '*_audit' --rows 20 --rows 'invoices=500'
 ```
 
@@ -113,11 +113,11 @@ Most seed tools produce rows. This one tells you when it cannot.
 > **Never write a row that cannot be shown to satisfy every constraint that was
 > read.**
 
-A table with a rule pgsow cannot prove it satisfies is named, the rule is
+A table with a rule pgseed cannot prove it satisfies is named, the rule is
 quoted, and the table is left alone:
 
 ```
-pgsow: 14 tables, 12 fillable, 2 refused (86% reach)
+pgseed: 14 tables, 12 fillable, 2 refused (86% reach)
 
   refused:
     invoices     CHECK "invoices_total_positive" CHECK ((total > (0)::numeric))

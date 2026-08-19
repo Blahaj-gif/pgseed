@@ -24,7 +24,7 @@ fn how_far_the_database_gets_us() {
 
     // One schema at a time when something needs looking at: this takes four
     // minutes over the whole corpus and a diagnosis rarely needs all of it.
-    let only = std::env::var("PGSOW_ONLY").unwrap_or_default();
+    let only = std::env::var("PGSEED_ONLY").unwrap_or_default();
 
     for source in shared::sources() {
         let name = &source.name;
@@ -40,16 +40,16 @@ fn how_far_the_database_gets_us() {
         let mut client = db.client();
         let schemas = shared::load(&mut client, &text);
 
-        let Ok(read) = pgsow::introspect::read(&mut client, &schemas) else {
+        let Ok(read) = pgseed::introspect::read(&mut client, &schemas) else {
             continue;
         };
-        let order = pgsow::graph::order(&read);
-        let verdict = pgsow::classify::classify(&read, &order);
-        let options = pgsow::emit::Options::flat(1, 5);
+        let order = pgseed::graph::order(&read);
+        let verdict = pgseed::classify::classify(&read, &order);
+        let options = pgseed::emit::Options::flat(1, 5);
 
         // Rolled back, so the measurement leaves nothing behind and the next
         // schema starts from the same place.
-        let outcome = match pgsow::probe::run(
+        let outcome = match pgseed::probe::run(
             &mut client,
             &read,
             &verdict,
@@ -141,11 +141,11 @@ fn how_far_the_database_gets_us() {
 /// a refusal that costs nothing belongs in a different sentence from one that
 /// costs a table.
 ///
-/// `PGSOW_ONLY=zitadel cargo test --test probe -- --ignored --nocapture fills_for_you`
+/// `PGSEED_ONLY=zitadel cargo test --test probe -- --ignored --nocapture fills_for_you`
 #[test]
 #[ignore]
 fn what_the_database_fills_for_you() {
-    let only = std::env::var("PGSOW_ONLY").unwrap_or_default();
+    let only = std::env::var("PGSEED_ONLY").unwrap_or_default();
 
     for source in shared::sources() {
         let name = &source.name;
@@ -160,16 +160,16 @@ fn what_the_database_fills_for_you() {
         let db = Db::start();
         let mut client = db.client();
         let schemas = shared::load(&mut client, &text);
-        let Ok(read) = pgsow::introspect::read(&mut client, &schemas) else {
+        let Ok(read) = pgseed::introspect::read(&mut client, &schemas) else {
             continue;
         };
-        let order = pgsow::graph::order(&read);
-        let verdict = pgsow::classify::classify(&read, &order);
-        let options = pgsow::emit::Options::flat(1, 5);
+        let order = pgseed::graph::order(&read);
+        let verdict = pgseed::classify::classify(&read, &order);
+        let options = pgseed::emit::Options::flat(1, 5);
 
         // Kept, not rolled back: the question is what is in the database
         // afterwards, which is the thing a user would look at.
-        let Ok(outcome) = pgsow::probe::run(
+        let Ok(outcome) = pgseed::probe::run(
             &mut client,
             &read,
             &verdict,

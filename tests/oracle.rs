@@ -14,7 +14,7 @@
 mod harness;
 
 use harness::Db;
-use pgsow::{classify, emit, graph, introspect};
+use pgseed::{classify, emit, graph, introspect};
 
 /// Create the schema, generate for it, apply the result, and report what
 /// Postgres made of it.
@@ -503,7 +503,7 @@ fn an_exclusion_constraint_refuses_its_table_rather_than_guessing() {
     let order = graph::order(&schema);
     let verdict = classify::classify(&schema, &order);
 
-    assert!(verdict.is_refused(&pgsow::schema::TableId::new("public", "sprints")));
+    assert!(verdict.is_refused(&pgseed::schema::TableId::new("public", "sprints")));
     assert_eq!(
         verdict.fillable.len(),
         1,
@@ -859,7 +859,7 @@ fn a_column_obliged_to_be_null_cannot_also_be_the_one_holding_a_value() {
     let verdict = classify::classify(&schema, &order);
 
     assert!(
-        verdict.is_refused(&pgsow::schema::TableId::new("public", "ai_tool_rules")),
+        verdict.is_refused(&pgseed::schema::TableId::new("public", "ai_tool_rules")),
         "no row satisfies both rules, so the table must be named"
     );
     // `b` is free, so one column can still hold the value and this one works.
@@ -905,7 +905,7 @@ fn a_column_restricted_to_a_list_of_values_gets_one_of_them() {
 }
 
 /// Run a probe against a fresh database and hand back what came of it.
-fn probed(ddl: &str, rows: usize, keep: bool) -> (Db, pgsow::probe::Outcome) {
+fn probed(ddl: &str, rows: usize, keep: bool) -> (Db, pgseed::probe::Outcome) {
     let db = Db::start();
     db.apply(ddl);
 
@@ -913,7 +913,7 @@ fn probed(ddl: &str, rows: usize, keep: bool) -> (Db, pgsow::probe::Outcome) {
     let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
     let order = graph::order(&schema);
     let verdict = classify::classify(&schema, &order);
-    let outcome = pgsow::probe::run(
+    let outcome = pgseed::probe::run(
         &mut client,
         &schema,
         &verdict,

@@ -2,7 +2,7 @@
 //!
 //! Everything else here tests the library. This checks the two things only the
 //! command line can get wrong: that SQL goes to stdout while the report goes
-//! to stderr — so `pgsow > seed.sql` produces a file that actually runs — and
+//! to stderr — so `pgseed > seed.sql` produces a file that actually runs — and
 //! that the exit codes mean what the README says they mean.
 
 mod harness;
@@ -12,12 +12,12 @@ use std::process::Command;
 use harness::Db;
 
 fn run(url: &str, args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(env!("CARGO_BIN_EXE_pgsow"))
+    let out = Command::new(env!("CARGO_BIN_EXE_pgseed"))
         .arg("--dsn")
         .arg(url)
         .args(args)
         .output()
-        .expect("could not run pgsow");
+        .expect("could not run pgseed");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -51,7 +51,10 @@ fn the_two_streams_are_kept_apart_and_the_exit_codes_mean_something() {
     let (stdout, stderr, code) = run(&db.url, &["--rows", "3"]);
     assert!(stdout.starts_with("BEGIN;"), "{stdout}");
     assert!(stdout.contains("INSERT INTO"));
-    assert!(!stdout.contains("pgsow:"), "the report leaked into the SQL");
+    assert!(
+        !stdout.contains("pgseed:"),
+        "the report leaked into the SQL"
+    );
     assert!(
         !stdout.contains("\"hard\""),
         "a refused table appeared in the SQL"
@@ -203,7 +206,7 @@ fn include_and_exclude_choose_the_tables_and_exclude_wins() {
 fn out_writes_the_sql_to_a_file_and_stdout_stays_empty() {
     let db = Db::start();
     db.apply("CREATE TABLE users (id int PRIMARY KEY);");
-    let path = std::env::temp_dir().join("pgsow_cli_out.sql");
+    let path = std::env::temp_dir().join("pgseed_cli_out.sql");
     let _ = std::fs::remove_file(&path);
 
     let (stdout, _, code) = run(&db.url, &["--rows", "5", "--out", path.to_str().unwrap()]);

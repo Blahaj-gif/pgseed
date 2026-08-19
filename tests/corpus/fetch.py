@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-AGENT = "pgsow-corpus/0.1 (https://github.com/Blahaj-gif/pgsow)"
+AGENT = "pgseed-corpus/0.1 (https://github.com/Blahaj-gif/pgseed)"
 TREE = "https://api.github.com/repos/{repo}/git/trees/{ref}:{path}?recursive=1"
 RAW = "https://raw.githubusercontent.com/{repo}/{ref}/{path}/{name}"
 

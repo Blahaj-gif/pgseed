@@ -63,16 +63,16 @@ fn what_the_partitioned_tables_look_like() {
                 empty_parents += 1;
                 format!("{kind} with no partitions at all")
             } else {
-                match pgsow::partitions::interpret(&key, &bounds) {
-                    pgsow::partitions::Routing::Anything => {
+                match pgseed::partitions::interpret(&key, &bounds) {
+                    pgseed::partitions::Routing::Anything => {
                         readable += 1;
                         format!("{kind} read as unconstrained")
                     }
-                    pgsow::partitions::Routing::OneOf { .. } => {
+                    pgseed::partitions::Routing::OneOf { .. } => {
                         readable += 1;
                         format!("{kind} read as a value set")
                     }
-                    pgsow::partitions::Routing::Unknown => format!("{kind} NOT READ"),
+                    pgseed::partitions::Routing::Unknown => format!("{kind} NOT READ"),
                 }
             };
             *here.entry(label.clone()).or_default() += 1;

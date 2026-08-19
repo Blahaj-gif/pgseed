@@ -73,10 +73,10 @@ fn what_the_text_columns_are_called() {
             total += 1;
             here_total += 1;
             *whole.entry(column.clone()).or_default() += 1;
-            if pgsow::nouns::of(&column.to_lowercase()).is_some() {
+            if pgseed::nouns::of(&column.to_lowercase()).is_some() {
                 named_flat += 1;
             }
-            if pgsow::nouns::of(&column).is_some() {
+            if pgseed::nouns::of(&column).is_some() {
                 named += 1;
                 here_named += 1;
             } else {

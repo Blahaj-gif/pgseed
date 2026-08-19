@@ -1,10 +1,10 @@
 [package]
-name = "pgsow"
+name = "pgseed"
 version = "0.1.0"
 edition = "2021"
 description = "Reads a Postgres schema and generates data that satisfies it — or names the table it will not touch, and why"
 license = "MIT"
-repository = "https://github.com/Blahaj-gif/pgsow"
+repository = "https://github.com/Blahaj-gif/pgseed"
 keywords = ["postgres", "seed", "test-data", "fixtures", "database"]
 categories = ["command-line-utilities", "database"]
 rust-version = "1.75"

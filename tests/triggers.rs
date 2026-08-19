@@ -54,8 +54,8 @@ fn what_the_triggers_do() {
 
         // The schema as this tool reads it, so the question is asked of the
         // real columns and the real keys rather than of the trigger text.
-        let schema_tables: std::collections::BTreeMap<String, pgsow::schema::Table> =
-            match pgsow::introspect::read(&mut client, &schemas) {
+        let schema_tables: std::collections::BTreeMap<String, pgseed::schema::Table> =
+            match pgseed::introspect::read(&mut client, &schemas) {
                 Ok(read) => read
                     .tables
                     .values()
@@ -79,9 +79,9 @@ fn what_the_triggers_do() {
                     .iter()
                     .map(|c| c.name.clone())
                     .collect();
-                if pgsow::triggers::interferes(&body, &names) {
+                if pgseed::triggers::interferes(&body, &names) {
                     interfering += 1;
-                    let assigned = pgsow::triggers::assigns_to_new(&body);
+                    let assigned = pgseed::triggers::assigns_to_new(&body);
                     let raises = {
                         let text = body.to_uppercase();
                         text.contains("RAISE") || text.contains("ASSERT")

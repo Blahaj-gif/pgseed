@@ -106,8 +106,8 @@ impl Coverage {
         ]
     }
 
-    fn of(schema: &pgsow::schema::Schema, order: &pgsow::graph::Order) -> Coverage {
-        use pgsow::schema::ColumnType;
+    fn of(schema: &pgseed::schema::Schema, order: &pgseed::graph::Order) -> Coverage {
+        use pgseed::schema::ColumnType;
         let mut out = Coverage {
             foreign_key_cycle: order.cycles.iter().any(|c| c.tables.len() > 1),
             ..Default::default()
@@ -144,7 +144,7 @@ impl Coverage {
 }
 
 fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
-    let verbose = !std::env::var("PGSOW_ONLY").unwrap_or_default().is_empty();
+    let verbose = !std::env::var("PGSEED_ONLY").unwrap_or_default().is_empty();
     let Ok(sql) = std::fs::read_to_string(path) else {
         eprintln!("  {name}: not fetched, skipping");
         return None;
@@ -327,10 +327,10 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
          every number below it flattering rather than wrong, which is worse."
     );
 
-    let schema = pgsow::introspect::read(&mut client, &schemas)
+    let schema = pgseed::introspect::read(&mut client, &schemas)
         .expect("introspection failed on a real schema");
-    let order = pgsow::graph::order(&schema);
-    let verdict = pgsow::classify::classify(&schema, &order);
+    let order = pgseed::graph::order(&schema);
+    let verdict = pgseed::classify::classify(&schema, &order);
 
     // Why each refusal happened, which is more useful than the total.
     let (mut checks, mut types, mut cycles, mut inherited, mut unread, mut keys) =
@@ -338,13 +338,13 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
     for (_, reasons) in &verdict.refused {
         for reason in reasons {
             match reason {
-                pgsow::classify::Refusal::CheckConstraint { .. } => checks += 1,
-                pgsow::classify::Refusal::UnsupportedType { .. } => types += 1,
-                pgsow::classify::Refusal::UnbreakableCycle { .. } => cycles += 1,
-                pgsow::classify::Refusal::DependsOnRefused { .. } => inherited += 1,
-                pgsow::classify::Refusal::DependsOnUnread { .. } => unread += 1,
-                pgsow::classify::Refusal::UnsatisfiableKeys { .. } => keys += 1,
-                pgsow::classify::Refusal::EntangledForeignKeys { .. } => keys += 1,
+                pgseed::classify::Refusal::CheckConstraint { .. } => checks += 1,
+                pgseed::classify::Refusal::UnsupportedType { .. } => types += 1,
+                pgseed::classify::Refusal::UnbreakableCycle { .. } => cycles += 1,
+                pgseed::classify::Refusal::DependsOnRefused { .. } => inherited += 1,
+                pgseed::classify::Refusal::DependsOnUnread { .. } => unread += 1,
+                pgseed::classify::Refusal::UnsatisfiableKeys { .. } => keys += 1,
+                pgseed::classify::Refusal::EntangledForeignKeys { .. } => keys += 1,
             }
         }
     }
@@ -427,8 +427,8 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
     // rows passed this gate while a `varchar(4)` unique column was still
     // colliding at fifty — the collision needed more rows than the gate was
     // asking for, which made the gate agree with itself and nothing else.
-    let options = pgsow::emit::Options::flat(1, 50);
-    let statements = pgsow::emit::statements(&schema, &verdict, &options);
+    let options = pgseed::emit::Options::flat(1, 50);
+    let statements = pgseed::emit::statements(&schema, &verdict, &options);
 
     let (mut accepted, mut rejected) = (0usize, 0usize);
     let mut first_failures: Vec<String> = Vec::new();
@@ -515,9 +515,9 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Option<Coverage> {
 /// requirement, since the child can be written with a NULL there, so the walk
 /// stops at those.
 fn structurally_unfillable(
-    schema: &pgsow::schema::Schema,
-) -> std::collections::BTreeSet<pgsow::schema::TableId> {
-    let mut out: std::collections::BTreeSet<pgsow::schema::TableId> = schema
+    schema: &pgseed::schema::Schema,
+) -> std::collections::BTreeSet<pgseed::schema::TableId> {
+    let mut out: std::collections::BTreeSet<pgseed::schema::TableId> = schema
         .tables
         .values()
         .filter(|t| {
@@ -555,10 +555,10 @@ fn reach_against_real_schemas() {
     let mut schemas = 0usize;
     // One schema at a time when something needs looking at. The whole corpus
     // is four minutes and a diagnosis rarely needs all of it, so
-    // `PGSOW_ONLY=langfuse cargo test --test corpus` runs one — and, since the
+    // `PGSEED_ONLY=langfuse cargo test --test corpus` runs one — and, since the
     // point is then diagnosis rather than a number, prints every failure
     // instead of the first few. `probe` has had this for the same reason.
-    let only = std::env::var("PGSOW_ONLY").unwrap_or_default();
+    let only = std::env::var("PGSEED_ONLY").unwrap_or_default();
     for source in corpus_shared::sources() {
         if !only.is_empty() && !only.split(',').any(|want| want == source.name) {
             continue;
@@ -655,14 +655,14 @@ fn survey_the_checks_this_does_not_understand() {
         let db = Db::start();
         let mut client = db.client();
         let schemas = corpus_shared::load(&mut client, &text);
-        let Ok(schema) = pgsow::introspect::read(&mut client, &schemas) else {
+        let Ok(schema) = pgseed::introspect::read(&mut client, &schemas) else {
             continue;
         };
         for table in schema.tables.values() {
             for check in &table.checks {
                 total += 1;
-                let read = pgsow::checks::interpret_all(&check.definition);
-                if read.contains(&pgsow::checks::Meaning::Unknown) {
+                let read = pgseed::checks::interpret_all(&check.definition);
+                if read.contains(&pgseed::checks::Meaning::Unknown) {
                     println!(
                         "UNKNOWN\t{name}\t{}\t{}",
                         table.id,
@@ -707,16 +707,16 @@ fn volume_and_whether_copy_could_carry_it() {
         for statement in statements(&text) {
             let _ = client.batch_execute(&statement);
         }
-        let Ok(schema) = pgsow::introspect::read(&mut client, &schemas_in(&text)) else {
+        let Ok(schema) = pgseed::introspect::read(&mut client, &schemas_in(&text)) else {
             continue;
         };
-        let order = pgsow::graph::order(&schema);
-        let verdict = pgsow::classify::classify(&schema, &order);
+        let order = pgseed::graph::order(&schema);
+        let verdict = pgseed::classify::classify(&schema, &order);
 
         for rows in [50usize, 1000] {
-            let options = pgsow::emit::Options::flat(1, rows);
+            let options = pgseed::emit::Options::flat(1, rows);
             let started = std::time::Instant::now();
-            let statements = pgsow::emit::statements(&schema, &verdict, &options);
+            let statements = pgseed::emit::statements(&schema, &verdict, &options);
             let generated = started.elapsed();
             let bytes: usize = statements.iter().map(|s| s.len()).sum();
 
@@ -785,7 +785,7 @@ fn survey_overlapping_foreign_keys() {
         let db = Db::start();
         let mut client = db.client();
         let schemas = corpus_shared::load(&mut client, &sql);
-        let Ok(read) = pgsow::introspect::read(&mut client, &schemas) else {
+        let Ok(read) = pgseed::introspect::read(&mut client, &schemas) else {
             continue;
         };
         let mut here = 0usize;
@@ -824,17 +824,17 @@ fn survey_overlapping_foreign_keys() {
 #[ignore]
 fn readme_speed() {
     // Generation only, streamed, exactly as `--out` does it.
-    let time_it = |schema: &pgsow::schema::Schema,
-                   verdict: &pgsow::classify::Verdict,
+    let time_it = |schema: &pgseed::schema::Schema,
+                   verdict: &pgseed::classify::Verdict,
                    rows: usize|
      -> (std::time::Duration, usize, usize) {
-        let options = pgsow::emit::Options::flat(1, rows);
+        let options = pgseed::emit::Options::flat(1, rows);
         let (mut bytes, mut count) = (0usize, 0usize);
         let started = std::time::Instant::now();
-        pgsow::emit::for_each_statement(schema, verdict, &options, &mut |written| {
+        pgseed::emit::for_each_statement(schema, verdict, &options, &mut |written| {
             bytes += written.sql.len();
             count += 1;
-            pgsow::emit::Took::Kept
+            pgseed::emit::Took::Kept
         });
         (started.elapsed(), bytes, count)
     };
@@ -842,9 +842,9 @@ fn readme_speed() {
     let read = |sql: &str, db: &Db| {
         let mut client = db.client();
         let schemas = corpus_shared::load(&mut client, sql);
-        let schema = pgsow::introspect::read(&mut client, &schemas).expect("a readable schema");
-        let order = pgsow::graph::order(&schema);
-        let verdict = pgsow::classify::classify(&schema, &order);
+        let schema = pgseed::introspect::read(&mut client, &schemas).expect("a readable schema");
+        let order = pgseed::graph::order(&schema);
+        let verdict = pgseed::classify::classify(&schema, &order);
         (schema, verdict)
     };
 

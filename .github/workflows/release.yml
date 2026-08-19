@@ -37,17 +37,17 @@ jobs:
       - run: cargo build --release --target ${{ matrix.target }}
 
       # The binary is renamed to carry its target, because three files called
-      # `pgsow` in one release directory is not a release.
+      # `pgseed` in one release directory is not a release.
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
-          name=pgsow-${{ matrix.target }}
-          if [ -f "target/${{ matrix.target }}/release/pgsow.exe" ]; then
-            cp "target/${{ matrix.target }}/release/pgsow.exe" "$name.exe"
+          name=pgseed-${{ matrix.target }}
+          if [ -f "target/${{ matrix.target }}/release/pgseed.exe" ]; then
+            cp "target/${{ matrix.target }}/release/pgseed.exe" "$name.exe"
             sha256sum "$name.exe" > "$name.exe.sha256"
           else
-            cp "target/${{ matrix.target }}/release/pgsow" "$name"
+            cp "target/${{ matrix.target }}/release/pgseed" "$name"
             chmod +x "$name"
             shasum -a 256 "$name" > "$name.sha256"
           fi
@@ -58,17 +58,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f "pgsow-${{ matrix.target }}.exe" ]; then
-            ./pgsow-${{ matrix.target }}.exe --version
+          if [ -f "pgseed-${{ matrix.target }}.exe" ]; then
+            ./pgseed-${{ matrix.target }}.exe --version
           else
-            ./pgsow-${{ matrix.target }} --version
+            ./pgseed-${{ matrix.target }} --version
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pgsow-${{ matrix.target }}
+          name: pgseed-${{ matrix.target }}
           path: |
-            pgsow-${{ matrix.target }}*
+            pgseed-${{ matrix.target }}*
 
   publish:
     needs: build
@@ -80,5 +80,5 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: pgsow-*
+          files: pgseed-*
           generate_release_notes: true

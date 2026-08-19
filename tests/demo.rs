@@ -59,15 +59,15 @@ fn what_the_rows_look_like() {
     let mut client = db.client();
     client.batch_execute(SCHEMA).expect("the demo schema loads");
 
-    let read = pgsow::introspect::read(&mut client, &["public".to_string()]).expect("read");
-    let order = pgsow::graph::order(&read);
-    let verdict = pgsow::classify::classify(&read, &order);
+    let read = pgseed::introspect::read(&mut client, &["public".to_string()]).expect("read");
+    let order = pgseed::graph::order(&read);
+    let verdict = pgseed::classify::classify(&read, &order);
     for (id, reasons) in &verdict.refused {
         for reason in reasons {
             println!("REFUSED {id}: {}", reason.explain());
         }
     }
-    let sql = pgsow::emit::sql(&read, &verdict, &pgsow::emit::Options::flat(1, 4));
+    let sql = pgseed::emit::sql(&read, &verdict, &pgseed::emit::Options::flat(1, 4));
     println!("\n{sql}");
 
     // And the database still adjudicates, because a demo that does not apply

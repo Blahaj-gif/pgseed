@@ -21,10 +21,10 @@
 mod harness;
 
 use harness::Db;
-use pgsow::{classify, emit, graph, introspect};
+use pgseed::{classify, emit, graph, introspect};
 
 /// Read a schema, classify it, and produce the SQL, without applying it.
-fn plan(db: &Db, rows: usize) -> (pgsow::schema::Schema, classify::Verdict, String) {
+fn plan(db: &Db, rows: usize) -> (pgseed::schema::Schema, classify::Verdict, String) {
     let mut client = db.client();
     let schema = introspect::read(&mut client, &["public".to_string()]).unwrap();
     let order = graph::order(&schema);
@@ -410,7 +410,7 @@ fn probing_twice_reaches_the_same_verdict_and_writes_the_same_rows() {
         let order = graph::order(&schema);
         let verdict = classify::classify(&schema, &order);
         let mut sql = String::new();
-        let outcome = pgsow::probe::run(
+        let outcome = pgseed::probe::run(
             &mut client,
             &schema,
             &verdict,
@@ -459,7 +459,7 @@ fn probing_writes_the_understood_rows_exactly_as_a_plain_apply_would() {
         let order = graph::order(&schema);
         let verdict = classify::classify(&schema, &order);
         let mut sql = String::new();
-        pgsow::probe::run(
+        pgseed::probe::run(
             &mut client,
             &schema,
             &verdict,
@@ -538,7 +538,7 @@ fn a_child_deeper_than_its_parent_still_names_the_person_it_points_at() {
     let verdict = classify::classify(&schema, &order);
     let options = emit::Options {
         seed: 1,
-        rows: pgsow::filter::RowCounts::parse(&["3".into(), "notes=7".into()]).unwrap(),
+        rows: pgseed::filter::RowCounts::parse(&["3".into(), "notes=7".into()]).unwrap(),
     };
     let sql = emit::sql(&schema, &verdict, &options);
     db.client()

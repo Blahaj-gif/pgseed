@@ -38,9 +38,9 @@ impl Db {
             .start()
             .expect("could not start the embedded postgres");
         postgres
-            .create_database("pgsow_test")
+            .create_database("pgseed_test")
             .expect("could not create the test database");
-        let url = postgres.settings().url("pgsow_test");
+        let url = postgres.settings().url("pgseed_test");
         Db { postgres, url }
     }
 

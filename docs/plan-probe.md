@@ -69,7 +69,7 @@ real, and probing agrees with them.
 `src/probe.rs`, `--probe`, and one change to the emitter.
 
 **One pass, not two.** Every table goes in dependency order with nothing
-refused, and each statement is executed inside `SAVEPOINT pgsow_probe`. Kept,
+refused, and each statement is executed inside `SAVEPOINT pgseed_probe`. Kept,
 it is released; refused, it is rolled back and the table stays refused. Two
 passes would have been tidier and would not work: a rescued parent has to be
 written before the child that points at it, and for a parent whose key has no

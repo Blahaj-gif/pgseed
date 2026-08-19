@@ -1,4 +1,4 @@
-//! `pgsow` — read a Postgres schema and produce data that satisfies it.
+//! `pgseed` — read a Postgres schema and produce data that satisfies it.
 //!
 //! Point it at a connection string. It reads the schema, works out the insert
 //! order, and either prints the SQL or writes the rows — or names the table it
@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::io::Write;
 
 use clap::Parser;
-use pgsow::{classify, dsn, emit, filter, graph, introspect};
+use pgseed::{classify, dsn, emit, filter, graph, introspect};
 
 /// What the database actually said.
 ///
@@ -46,7 +46,7 @@ fn explain(e: &postgres::Error) -> String {
 
 #[derive(Parser)]
 #[command(
-    name = "pgsow",
+    name = "pgseed",
     version,
     about = "Reads a Postgres schema and says what it could fill — or names the table it will not touch, and why"
 )]
@@ -113,7 +113,7 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(code) => code,
         Err(message) => {
-            eprintln!("pgsow: {message}");
+            eprintln!("pgseed: {message}");
             std::process::ExitCode::from(2)
         }
     }
@@ -155,7 +155,7 @@ fn run() -> Result<std::process::ExitCode, String> {
     ) {
         for row in &rows {
             let missing: String = row.get(0);
-            eprintln!("pgsow: there is no schema called {missing}");
+            eprintln!("pgseed: there is no schema called {missing}");
         }
     }
 
@@ -165,7 +165,7 @@ fn run() -> Result<std::process::ExitCode, String> {
     // understood: a row the database accepted and a row this could show was
     // right are different kinds of confidence, and one number for both throws
     // away the distinction the tool exists for.
-    let mut probed: Option<pgsow::probe::Outcome> = None;
+    let mut probed: Option<pgseed::probe::Outcome> = None;
 
     // Filtering happens after classification, so a table left out is simply
     // not written rather than being reported as refused. Those are different
@@ -191,7 +191,7 @@ fn run() -> Result<std::process::ExitCode, String> {
     for unmatched in rows.unmatched(&verdict.fillable) {
         // A mistyped override that is silently ignored produces a run which
         // looks like it worked and did something else.
-        eprintln!("pgsow: --rows {unmatched} matched no table");
+        eprintln!("pgseed: --rows {unmatched} matched no table");
     }
 
     let options = emit::Options {
@@ -246,7 +246,7 @@ fn run() -> Result<std::process::ExitCode, String> {
                 .collect();
             if !also.is_empty() {
                 eprintln!(
-                    "pgsow: also emptying {} at the targets — {}",
+                    "pgseed: also emptying {} at the targets — {}",
                     if also.len() == 1 {
                         "1 table that points".to_string()
                     } else {
@@ -264,7 +264,7 @@ fn run() -> Result<std::process::ExitCode, String> {
         }
 
         if args.probe {
-            let outcome = pgsow::probe::run(
+            let outcome = pgseed::probe::run(
                 &mut client,
                 &read,
                 &verdict,
@@ -274,11 +274,11 @@ fn run() -> Result<std::process::ExitCode, String> {
                 &mut |_| {},
             )
             .map_err(|e| format!("nothing was written — {e}"))?;
-            eprintln!("pgsow: applied {} statements", outcome.kept);
+            eprintln!("pgseed: applied {} statements", outcome.kept);
             probed = Some(outcome);
         } else {
             match emit::apply(&mut client, &read, &verdict, &options) {
-                Ok(n) => eprintln!("pgsow: applied {n} statements"),
+                Ok(n) => eprintln!("pgseed: applied {n} statements"),
                 // The transaction rolled back, so the database is as it was.
                 Err(e) => return Err(format!("nothing was written — {}", explain(&e))),
             }
@@ -288,7 +288,7 @@ fn run() -> Result<std::process::ExitCode, String> {
         // I actually get" is worth an honest answer, and for --probe that
         // answer is only knowable by asking. The transaction is rolled back.
         if args.probe {
-            probed = Some(pgsow::probe::run(
+            probed = Some(pgseed::probe::run(
                 &mut client,
                 &read,
                 &verdict,
@@ -316,7 +316,7 @@ fn run() -> Result<std::process::ExitCode, String> {
             // the statements it kept.
             use std::io::Write as _;
             let mut failure = None;
-            let outcome = pgsow::probe::run(
+            let outcome = pgseed::probe::run(
                 &mut client,
                 &read,
                 &verdict,
@@ -370,9 +370,9 @@ fn run() -> Result<std::process::ExitCode, String> {
 /// closure rather than one step of it: a `payments` that points at `invoices`
 /// that points at `orders` blocks the truncate just as surely.
 fn dependents_of(
-    schema: &pgsow::schema::Schema,
-    targets: &[pgsow::schema::TableId],
-) -> Vec<pgsow::schema::TableId> {
+    schema: &pgseed::schema::Schema,
+    targets: &[pgseed::schema::TableId],
+) -> Vec<pgseed::schema::TableId> {
     let mut wanted: BTreeSet<_> = targets.iter().cloned().collect();
     let mut added = true;
     while added {
@@ -396,15 +396,15 @@ fn dependents_of(
 }
 
 fn report(
-    read: &pgsow::schema::Schema,
+    read: &pgseed::schema::Schema,
     verdict: &classify::Verdict,
     rows: &filter::RowCounts,
-    dropped: &BTreeSet<pgsow::schema::TableId>,
-    probed: Option<&pgsow::probe::Outcome>,
+    dropped: &BTreeSet<pgseed::schema::TableId>,
+    probed: Option<&pgseed::probe::Outcome>,
     written: bool,
 ) {
     eprintln!(
-        "pgsow: {} {}, {} fillable, {} refused ({:.0}% reach)",
+        "pgseed: {} {}, {} fillable, {} refused ({:.0}% reach)",
         verdict.total(),
         if verdict.total() == 1 {
             "table"
@@ -437,7 +437,7 @@ fn report(
         // With the row count beside each name, because it is not always the
         // number that was asked for. A unique boolean holds two rows and a
         // join table holds as many as it has pairs.
-        let counts = pgsow::volume::plan(read, &verdict.fillable, rows);
+        let counts = pgseed::volume::plan(read, &verdict.fillable, rows);
         // Tense matters more than it looks: after `--apply` the rows are in
         // the database, and a report still saying "would fill" reads like
         // nothing happened.

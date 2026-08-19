@@ -147,13 +147,13 @@ pub fn run(
         // nothing deferrable, and an unprotected failure poisons the whole
         // transaction — which in the survey that measured this showed up as
         // three schemas filling nothing at all.
-        if transaction.batch_execute("SAVEPOINT pgsow_probe").is_err() {
+        if transaction.batch_execute("SAVEPOINT pgseed_probe").is_err() {
             broken_promise = Some("the transaction stopped accepting savepoints".into());
             return Took::Stop;
         }
         match transaction.batch_execute(written.sql) {
             Ok(()) => {
-                let _ = transaction.batch_execute("RELEASE SAVEPOINT pgsow_probe");
+                let _ = transaction.batch_execute("RELEASE SAVEPOINT pgseed_probe");
                 outcome.kept += 1;
                 if let Some(id) = written.table {
                     if !understood.contains(id) {
@@ -164,7 +164,7 @@ pub fn run(
                 Took::Kept
             }
             Err(e) => {
-                let _ = transaction.batch_execute("ROLLBACK TO SAVEPOINT pgsow_probe");
+                let _ = transaction.batch_execute("ROLLBACK TO SAVEPOINT pgseed_probe");
                 match written.table {
                     Some(id) if understood.contains(id) => {
                         // A table this claimed to understand. The claim was

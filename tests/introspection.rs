@@ -22,12 +22,12 @@ fn a_real_schema_reads_back_the_way_the_ddl_described_it() {
     );
 
     let mut client = db.client();
-    let schema = pgsow::introspect::read(&mut client, &["public".to_string()])
+    let schema = pgseed::introspect::read(&mut client, &["public".to_string()])
         .expect("introspection failed");
 
     assert_eq!(schema.len(), 1);
     let table = schema
-        .get(&pgsow::schema::TableId::new("public", "users"))
+        .get(&pgseed::schema::TableId::new("public", "users"))
         .expect("users is missing");
 
     // The identity column must be recognised as generated: naming it in an
@@ -44,7 +44,7 @@ fn a_real_schema_reads_back_the_way_the_ddl_described_it() {
     assert!(!email.nullable);
     assert_eq!(
         email.type_,
-        pgsow::schema::ColumnType::Text {
+        pgseed::schema::ColumnType::Text {
             max_length: Some(255)
         }
     );
@@ -79,9 +79,9 @@ fn a_check_constraint_arrives_with_its_expression_and_refuses_the_table() {
     );
 
     let mut client = db.client();
-    let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let schema = pgseed::introspect::read(&mut client, &["public".to_string()]).unwrap();
     let table = schema
-        .get(&pgsow::schema::TableId::new("public", "invoices"))
+        .get(&pgseed::schema::TableId::new("public", "invoices"))
         .unwrap();
 
     assert_eq!(table.checks.len(), 1);
@@ -96,7 +96,7 @@ fn a_check_constraint_arrives_with_its_expression_and_refuses_the_table() {
     // column in the database gets its decimal point in the wrong place.
     assert_eq!(
         table.column("total").unwrap().type_,
-        pgsow::schema::ColumnType::Numeric {
+        pgseed::schema::ColumnType::Numeric {
             precision: Some(10),
             scale: Some(2)
         }
@@ -105,12 +105,12 @@ fn a_check_constraint_arrives_with_its_expression_and_refuses_the_table() {
     // `total > 0` is a recognised lower bound, so this table is fillable —
     // the point of the test is that the *expression* survived introspection,
     // which is why this reads pg_catalog and not information_schema.
-    let order = pgsow::graph::order(&schema);
-    let verdict = pgsow::classify::classify(&schema, &order);
+    let order = pgseed::graph::order(&schema);
+    let verdict = pgseed::classify::classify(&schema, &order);
     assert_eq!(verdict.fillable.len(), 1);
     assert_eq!(
-        pgsow::checks::interpret(&table.checks[0].definition),
-        pgsow::checks::Meaning::LowerBound {
+        pgseed::checks::interpret(&table.checks[0].definition),
+        pgseed::checks::Meaning::LowerBound {
             column: "total".into(),
             min: 0,
             inclusive: false
@@ -139,9 +139,9 @@ fn a_check_outside_the_closed_set_refuses_its_table_against_a_real_database() {
     );
 
     let mut client = db.client();
-    let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
-    let order = pgsow::graph::order(&schema);
-    let verdict = pgsow::classify::classify(&schema, &order);
+    let schema = pgseed::introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = pgseed::graph::order(&schema);
+    let verdict = pgseed::classify::classify(&schema, &order);
 
     assert!(verdict.fillable.is_empty());
     assert!(verdict.refused[0].1[0]
@@ -180,16 +180,16 @@ fn a_composite_foreign_key_keeps_its_columns_in_the_declared_order() {
     );
 
     let mut client = db.client();
-    let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let schema = pgseed::introspect::read(&mut client, &["public".to_string()]).unwrap();
     let child = schema
-        .get(&pgsow::schema::TableId::new("public", "child"))
+        .get(&pgseed::schema::TableId::new("public", "child"))
         .unwrap();
 
     let fk = &child.foreign_keys[0];
     assert_eq!(fk.columns, vec!["c_tenant", "c_code"]);
     assert_eq!(fk.referenced_columns, vec!["tenant_id", "code"]);
 
-    let order = pgsow::graph::order(&schema);
+    let order = pgseed::graph::order(&schema);
     let names: Vec<&str> = order.tables.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         names,
@@ -211,18 +211,21 @@ fn a_deferrable_cycle_is_recognised_as_deferrable() {
     );
 
     let mut client = db.client();
-    let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
-    let order = pgsow::graph::order(&schema);
+    let schema = pgseed::introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = pgseed::graph::order(&schema);
 
     assert_eq!(order.cycles.len(), 1);
     match &order.cycles[0].strategy {
-        pgsow::graph::CycleStrategy::Deferred { constraints } => {
+        pgseed::graph::CycleStrategy::Deferred { constraints } => {
             assert_eq!(constraints.len(), 2);
         }
         other => panic!("expected deferral, got {other:?}"),
     }
     assert!(order.blocked().is_empty());
-    assert_eq!(pgsow::classify::classify(&schema, &order).fillable.len(), 2);
+    assert_eq!(
+        pgseed::classify::classify(&schema, &order).fillable.len(),
+        2
+    );
 }
 
 #[test]
@@ -239,9 +242,9 @@ fn a_rigid_cycle_is_refused_against_a_real_database() {
     );
 
     let mut client = db.client();
-    let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
-    let order = pgsow::graph::order(&schema);
-    let verdict = pgsow::classify::classify(&schema, &order);
+    let schema = pgseed::introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let order = pgseed::graph::order(&schema);
+    let verdict = pgseed::classify::classify(&schema, &order);
 
     assert!(verdict.fillable.is_empty());
     assert_eq!(verdict.refused.len(), 2);
@@ -278,13 +281,13 @@ fn enums_domains_and_arrays_come_back_as_themselves() {
     );
 
     let mut client = db.client();
-    let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let schema = pgseed::introspect::read(&mut client, &["public".to_string()]).unwrap();
     let t = schema
-        .get(&pgsow::schema::TableId::new("public", "things"))
+        .get(&pgseed::schema::TableId::new("public", "things"))
         .unwrap();
 
     match &t.column("state").unwrap().type_ {
-        pgsow::schema::ColumnType::Enum { labels, .. } => {
+        pgseed::schema::ColumnType::Enum { labels, .. } => {
             assert_eq!(labels, &vec!["pending", "shipped", "cancelled"]);
         }
         other => panic!("expected an enum, got {other:?}"),
@@ -303,8 +306,8 @@ fn enums_domains_and_arrays_come_back_as_themselves() {
     // answer: refused rather than approximated.
     assert!(!t.column("amount").unwrap().type_.is_generatable());
 
-    let order = pgsow::graph::order(&schema);
-    let verdict = pgsow::classify::classify(&schema, &order);
+    let order = pgseed::graph::order(&schema);
+    let verdict = pgseed::classify::classify(&schema, &order);
     assert!(verdict.refused[0]
         .1
         .iter()
@@ -327,9 +330,12 @@ fn a_unique_index_is_read_as_the_key_it_is() {
              ON oauth_applications USING btree (secret);",
     );
     let mut client = db.client();
-    let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let schema = pgseed::introspect::read(&mut client, &["public".to_string()]).unwrap();
     let table = schema
-        .get(&pgsow::schema::TableId::new("public", "oauth_applications"))
+        .get(&pgseed::schema::TableId::new(
+            "public",
+            "oauth_applications",
+        ))
         .unwrap();
 
     let names: Vec<&str> = table.unique_keys.iter().map(|k| k.name.as_str()).collect();
@@ -369,9 +375,9 @@ fn a_unique_index_referenced_by_a_foreign_key_is_still_read() {
          );",
     );
     let mut client = db.client();
-    let schema = pgsow::introspect::read(&mut client, &["public".to_string()]).unwrap();
+    let schema = pgseed::introspect::read(&mut client, &["public".to_string()]).unwrap();
     let apps = schema
-        .get(&pgsow::schema::TableId::new("public", "apps"))
+        .get(&pgseed::schema::TableId::new("public", "apps"))
         .unwrap();
 
     let names: Vec<&str> = apps.unique_keys.iter().map(|k| k.name.as_str()).collect();
