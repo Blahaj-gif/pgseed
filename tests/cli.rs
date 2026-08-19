@@ -319,8 +319,5 @@ fn a_schema_that_is_not_there_says_so_rather_than_reporting_nothing() {
     let db = Db::start();
     db.apply("CREATE TABLE present (id serial PRIMARY KEY);");
     let (_, report, _) = run(&db.url, &["--plan", "--schema", "nosuchschema"]);
-    assert!(
-        report.contains("no schema called nosuchschema"),
-        "{report}"
-    );
+    assert!(report.contains("no schema called nosuchschema"), "{report}");
 }
