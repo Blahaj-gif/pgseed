@@ -29,11 +29,14 @@ allowed to ask the database. Where those come from and what they exclude is in
 
 ## Install
 
+Download a binary from the [releases page](https://github.com/Blahaj-gif/pgsow/releases)
+— Linux, macOS and Windows, each built and started by CI before it is
+published. Or build it yourself:
+
 ```
-cargo install pgsow
+cargo install --git https://github.com/Blahaj-gif/pgsow
 ```
 
-Or download a binary from the [releases page](https://github.com/Blahaj-gif/pgsow/releases).
 Nothing else is needed: no Docker, no Node, no daemon, no account.
 
 ## Getting started
@@ -184,10 +187,10 @@ measures agreement with that ecosystem rather than accuracy.
 | GitLab | 1,057 | 40% | 77% |
 | **total** | **2,586** | **66.6%** | **88.1%** |
 
-Measured twice on separate runs, identical both times. Every schema is pinned
+Measured twice on separate runs, identical both times, and identical again on
+Linux in CI — same table counts, same reach, every schema. Each one is pinned
 to a commit, so the numbers are reproducible rather than whatever a branch
-pointed at that day, and CI re-runs the whole corpus on Linux against the same
-pins.
+pointed at that day.
 
 </details>
 
