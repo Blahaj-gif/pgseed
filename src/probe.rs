@@ -24,8 +24,8 @@
 //! Measured across the corpus before any of this was built:
 //!
 //! ```text
-//!   63.2%  reasoning alone
-//!   82.9%  with the database asked
+//!   64.0%  reasoning alone
+//!   87.7%  with the database asked
 //! ```
 //!
 //! GitLab goes from 40% to 77%. What the rescues overrule is mostly the

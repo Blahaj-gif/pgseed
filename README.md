@@ -48,31 +48,45 @@ keeps what it accepts — see `--probe` below.
 | schema | tables | by reasoning | with `--probe` |
 |---|---:|---:|---:|
 | PowerDNS | 7 | 100% | 100% |
-| Hasura | 8 | 75% | 75% |
-| Kong | 9 | 89% | 89% |
+| Hasura | 8 | 88% | 88% |
+| Kong | 9 | 100% | 100% |
 | Sourcegraph *(codeintel)* | 13 | 77% | 92% |
-| Ory Hydra *(replayed migrations)* | 14 | 93% | 93% |
 | listmonk | 16 | 100% | 100% |
+| Ory Hydra *(replayed migrations)* | 18 | 83% | 94% |
 | Harbor | 21 | 100% | 100% |
 | Sourcegraph *(insights)* | 21 | 81% | 95% |
 | Ory Kratos *(replayed migrations)* | 23 | 100% | 100% |
-| Vaultwarden *(replayed migrations)* | 28 | 100% | 100% |
+| Vaultwarden *(replayed migrations)* | 29 | 100% | 100% |
 | hex.pm | 36 | 61% | 100% |
-| Temporal | 37 | 97% | 97% |
-| Plausible | 42 | 45% | 100% |
-| Mattermost *(replayed migrations)* | 81 | 94% | 100% |
-| Synapse | 134 | 94% | 96% |
-| PostgREST *(test fixtures — deliberately awkward)* | 135 | 94% | 97% |
+| Temporal | 37 | 100% | 100% |
+| Plausible | 41 | 44% | 100% |
+| Mattermost *(replayed migrations)* | 80 | 94% | 100% |
+| Synapse | 134 | 98% | 99% |
+| PostgREST *(test fixtures — deliberately awkward)* | 134 | 96% | 98% |
 | Lago | 138 | 83% | 98% |
-| Sourcegraph *(frontend)* | 180 | 42% | 83% |
+| Sourcegraph *(frontend)* | 180 | 43% | 83% |
 | Discourse | 351 | 93% | 99% |
 | GitLab | 1,057 | 40% | 77% |
-| **total** | **2,351** | **63.3%** | **87.2%** |
+| **total** | **2,353** | **64.0%** | **87.7%** |
 
-Measured twice, on separate runs, byte-identical both times. The corpus gate
-loads the same schemas through a stricter filter and counts 2,353 tables at
-63.5% — a two-table difference between two harnesses reading the same dumps,
-reported rather than reconciled away.
+Measured twice on separate runs, byte-identical both times, and the two
+harnesses — the corpus gate and the probe survey — now agree table for table.
+They did not always: the gate loaded schema DDL and the survey loaded whole
+dumps, seed rows included, so they were measuring different databases and
+reporting a two-table discrepancy. One definition of what loads, shared.
+
+### The ceiling, and why it is where it is
+
+**83 of the corpus's 106 partitioned tables have no partitions at all.** The
+dumps declare the parent and the application creates the partitions at runtime,
+so those tables can take no row from anybody. That is not a limit of this tool
+and no amount of reading bounds moves it. They stay in the denominator, because
+taking them out would be flattering the number rather than reporting it.
+
+Of everything still refused after the database has been asked: 90 are rows that
+land in no partition, 62 are CHECK constraints Postgres itself rejected the
+generated row for, 7 are triggers that raised, and most of the remaining 133
+are children of one of those.
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. Three are *replayed* migration directories rather
@@ -98,8 +112,8 @@ savepoint makes that a question you can ask and take back.
 
 | | reach | GitLab | Sourcegraph |
 |---|---:|---:|---:|
-| reasoning alone | 63.3% | 40% | 42% |
-| with `--probe` | **87.2%** | **77%** | **83%** |
+| reasoning alone | 64.0% | 40% | 43% |
+| with `--probe` | **87.7%** | **77%** | **83%** |
 
 Each table's INSERT goes in behind a savepoint. Kept, it stands; refused, it
 rolls back and the refusal is reported exactly as before. Without `--apply` the
@@ -142,7 +156,7 @@ writes SQL; `--plan` reports what it would do and writes nothing.
 Every row it produces is checked by the only authority that matters: a test
 generates for each corpus schema at the default fifty rows, applies the result
 to a real Postgres, and fails if a single statement is rejected. It currently
-generates **1,908 statements across the twenty schemas and Postgres accepts
+generates **1,921 statements across the twenty schemas and Postgres accepts
 every one** — with every one of their 456 triggers installed, and their 106
 partitioned tables read. The gate is zero, not a percentage — the whole thesis is that the
 database adjudicates, so one row it refuses is a failure rather than a figure
@@ -196,6 +210,10 @@ looking similar.
 | `char_length(col) <= N` | what `varchar(N)` already means |
 | `char_length(col) >= N`, `> N` | padded up to, where the column has room, and refused where it has not |
 | `(a IS NOT NULL AND b IS NULL) OR (a IS NULL AND b IS NOT NULL)` | exactly-one, written longhand — fill one, NULL the rest |
+| `num_nonnulls(a, b) = 2`, `>= 1`, `> 0` | at least one, or all of them — fill them all |
+| `col <= N`, `col < N`, `N <= col` | a ceiling or a floor on the number, either way round |
+| `col = 'X'` | one permitted value, which is a value set of one |
+| `A AND B` | both — and only when *both* are understood, because satisfying the half you recognise and ignoring the other is the silent pass this exists to avoid |
 | `col IS NOT NULL` | a column this never writes NULL into |
 | `octet_length(col) = N` / `<= N` | a fixed width, or a ceiling |
 | `col > N`, `col >= N` | a floor on the generated number |
