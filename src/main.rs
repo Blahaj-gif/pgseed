@@ -15,6 +15,35 @@ use std::io::Write;
 use clap::Parser;
 use pgsow::{classify, dsn, emit, filter, graph, introspect};
 
+/// What the database actually said.
+///
+/// `postgres::Error` renders as `db error` and nothing else, which is the
+/// least useful sentence available at the moment it matters most: the first
+/// thing a new user gets wrong is the connection string, and `cannot connect:
+/// db error` tells them nothing about which part.
+fn explain(e: &postgres::Error) -> String {
+    match e.as_db_error() {
+        Some(db) => {
+            let mut out = db.message().to_string();
+            if let Some(detail) = db.detail() {
+                out.push_str(&format!("\n       {detail}"));
+            }
+            if let Some(hint) = db.hint() {
+                out.push_str(&format!("\n       {hint}"));
+            }
+            out
+        }
+        // Not the database refusing, but the connection never reaching it.
+        None => {
+            let mut cause: &dyn std::error::Error = e;
+            while let Some(next) = cause.source() {
+                cause = next;
+            }
+            cause.to_string()
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "pgsow",
@@ -112,10 +141,23 @@ fn run() -> Result<std::process::ExitCode, String> {
     }
 
     let mut client = postgres::Client::connect(&args.dsn, postgres::NoTls)
-        .map_err(|e| format!("cannot connect: {e}"))?;
+        .map_err(|e| format!("cannot connect: {}", explain(&e)))?;
 
     let read = introspect::read(&mut client, &args.schema)
-        .map_err(|e| format!("cannot read the schema: {e}"))?;
+        .map_err(|e| format!("cannot read the schema: {}", explain(&e)))?;
+
+    // A mistyped `--schema` used to produce "0 tables, 0 fillable" and exit 0,
+    // which looks exactly like a schema that is genuinely empty. Silence is
+    // the one answer this tool is not allowed to give.
+    if let Ok(rows) = client.query(
+        "SELECT n FROM unnest($1::text[]) AS n          WHERE n NOT IN (SELECT nspname FROM pg_namespace)",
+        &[&args.schema],
+    ) {
+        for row in &rows {
+            let missing: String = row.get(0);
+            eprintln!("pgsow: there is no schema called {missing}");
+        }
+    }
 
     let order = graph::order(&read);
     let mut verdict = classify::classify(&read, &order);
@@ -128,16 +170,23 @@ fn run() -> Result<std::process::ExitCode, String> {
     // Filtering happens after classification, so a table left out is simply
     // not written rather than being reported as refused. Those are different
     // answers and the report must not blur them.
-    let dropped: BTreeSet<_> = verdict
+    let mut dropped: BTreeSet<_> = verdict
         .fillable
         .iter()
+        .chain(verdict.refused.iter().map(|(id, _)| id))
         .filter(|id| !selection.allows(id))
         .cloned()
         .collect();
     verdict.fillable.retain(|id| !dropped.contains(id));
+    // Refused tables are filtered too. They were not, and a run asking only
+    // for `--include 'Kunden*'` reported "1 refused" and named a table the
+    // user had just excluded — along with a reach figure computed over it.
+    // A table nobody asked about is not a refusal.
+    verdict.refused.retain(|(id, _)| !dropped.contains(id));
     verdict
         .deferred_repairs
         .retain(|(id, _)| !dropped.contains(id));
+    dropped.retain(|id| read.tables.contains_key(id));
 
     for unmatched in rows.unmatched(&verdict.fillable) {
         // A mistyped override that is silently ignored produces a run which
@@ -154,8 +203,10 @@ fn run() -> Result<std::process::ExitCode, String> {
         // The second guard, and the one that does not depend on the hostname:
         // an empty database is a scratch database whatever it is called.
         if !args.truncate && !args.allow_nonempty {
-            let populated = filter::already_populated(&mut client, &verdict.fillable)
-                .map_err(|e| format!("cannot tell whether the tables are empty: {e}"))?;
+            let populated =
+                filter::already_populated(&mut client, &verdict.fillable).map_err(|e| {
+                    format!("cannot tell whether the tables are empty: {}", explain(&e))
+                })?;
             if !populated.is_empty() {
                 let names: Vec<String> =
                     populated.keys().take(5).map(|id| id.to_string()).collect();
@@ -174,18 +225,42 @@ fn run() -> Result<std::process::ExitCode, String> {
         }
 
         if args.truncate && !verdict.fillable.is_empty() {
-            // Reverse dependency order, so a parent is never emptied while a
-            // child still points at it. CASCADE is deliberately not used: it
-            // would silently empty tables this was never asked to touch.
+            // Postgres will not empty a table that something else references,
+            // even when that something else is empty. A refused table with a
+            // foreign key into a filled one is an ordinary shape — an
+            // `invoices` this could not generate, pointing at an `orders` it
+            // could — and it used to make `--truncate` fail outright.
+            //
+            // So the targets, plus everything that points at them, however far
+            // that reaches. CASCADE would do the same thing; the objection to
+            // CASCADE was that it does it *silently*, and the extra tables are
+            // named below. A row in `invoices` whose `orders` row has just
+            // been deleted was not going to survive this either way.
+            let also = dependents_of(&read, &verdict.fillable);
             let names: Vec<String> = verdict
                 .fillable
                 .iter()
                 .rev()
+                .chain(also.iter())
                 .map(|id| id.quoted())
                 .collect();
+            if !also.is_empty() {
+                eprintln!(
+                    "pgsow: also emptying {} at the targets — {}",
+                    if also.len() == 1 {
+                        "1 table that points".to_string()
+                    } else {
+                        format!("{} tables that point", also.len())
+                    },
+                    also.iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             client
                 .batch_execute(&format!("TRUNCATE {};", names.join(", ")))
-                .map_err(|e| format!("could not empty the tables first: {e}"))?;
+                .map_err(|e| format!("could not empty the tables first: {}", explain(&e)))?;
         }
 
         if args.probe {
@@ -270,7 +345,14 @@ fn run() -> Result<std::process::ExitCode, String> {
         }
     }
 
-    report(&read, &verdict, &rows, &dropped, probed.as_ref());
+    report(
+        &read,
+        &verdict,
+        &rows,
+        &dropped,
+        probed.as_ref(),
+        args.apply,
+    );
 
     // 0 everything fillable · 1 something refused · 2 could not read, so this
     // composes in a script without anybody parsing the prose above.
@@ -281,16 +363,54 @@ fn run() -> Result<std::process::ExitCode, String> {
     })
 }
 
+/// Every table that points at one of `targets`, directly or through another,
+/// and is not already among them.
+///
+/// Emptying a table requires emptying whatever references it, so this is the
+/// closure rather than one step of it: a `payments` that points at `invoices`
+/// that points at `orders` blocks the truncate just as surely.
+fn dependents_of(
+    schema: &pgsow::schema::Schema,
+    targets: &[pgsow::schema::TableId],
+) -> Vec<pgsow::schema::TableId> {
+    let mut wanted: BTreeSet<_> = targets.iter().cloned().collect();
+    let mut added = true;
+    while added {
+        added = false;
+        for table in schema.tables.values() {
+            if wanted.contains(&table.id) {
+                continue;
+            }
+            if table
+                .foreign_keys
+                .iter()
+                .any(|fk| wanted.contains(&fk.references))
+            {
+                wanted.insert(table.id.clone());
+                added = true;
+            }
+        }
+    }
+    let targets: BTreeSet<_> = targets.iter().cloned().collect();
+    wanted.difference(&targets).cloned().collect()
+}
+
 fn report(
     read: &pgsow::schema::Schema,
     verdict: &classify::Verdict,
     rows: &filter::RowCounts,
     dropped: &BTreeSet<pgsow::schema::TableId>,
     probed: Option<&pgsow::probe::Outcome>,
+    written: bool,
 ) {
     eprintln!(
-        "pgsow: {} tables, {} fillable, {} refused ({:.0}% reach)",
+        "pgsow: {} {}, {} fillable, {} refused ({:.0}% reach)",
         verdict.total(),
+        if verdict.total() == 1 {
+            "table"
+        } else {
+            "tables"
+        },
         verdict.fillable.len(),
         verdict.refused.len(),
         verdict.reach() * 100.0,
@@ -318,7 +438,14 @@ fn report(
         // number that was asked for. A unique boolean holds two rows and a
         // join table holds as many as it has pairs.
         let counts = pgsow::volume::plan(read, &verdict.fillable, rows);
-        eprintln!("\n  would fill, in this order:");
+        // Tense matters more than it looks: after `--apply` the rows are in
+        // the database, and a report still saying "would fill" reads like
+        // nothing happened.
+        eprintln!(
+            "
+  {}, in this order:",
+            if written { "filled" } else { "would fill" }
+        );
         for id in &verdict.fillable {
             let asked = rows.for_table(id);
             let n = counts.get(id).copied().unwrap_or(asked);

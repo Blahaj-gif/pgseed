@@ -260,3 +260,67 @@ fn writing_somewhere_that_is_not_this_machine_needs_saying_so() {
     assert_eq!(code, 2);
     assert!(stderr.contains("cannot connect"), "{stderr}");
 }
+
+#[test]
+fn truncate_works_when_something_refused_points_at_the_targets() {
+    // Found by using the tool rather than by testing it. Postgres will not
+    // empty a table that another references, even an empty one, and a refused
+    // table with a foreign key into a filled one is an ordinary shape — so
+    // `--truncate` failed outright on the second command a new user runs.
+    let db = Db::start();
+    db.apply(
+        "CREATE TABLE orders (id serial PRIMARY KEY, note text);
+         CREATE TABLE invoices (
+             id       serial PRIMARY KEY,
+             order_id int NOT NULL REFERENCES orders(id),
+             ref      text NOT NULL CONSTRAINT invoices_ref CHECK (ref ~ '^INV-[0-9]{6}$')
+         );",
+    );
+
+    let (_, first, code) = run(&db.url, &["--rows", "4", "--apply"]);
+    assert_eq!(code, 1, "invoices is refused, so something was refused");
+    assert!(first.contains("invoices"), "{first}");
+    assert_eq!(rows(&db, "orders"), 4);
+
+    let (_, again, code) = run(&db.url, &["--rows", "4", "--apply", "--truncate"]);
+    assert_ne!(code, 2, "truncate must not fail outright: {again}");
+    assert_eq!(rows(&db, "orders"), 4, "emptied and refilled, not doubled");
+    // And it says what else it emptied, because doing that silently is the
+    // whole objection to CASCADE.
+    assert!(
+        again.contains("also emptying") && again.contains("invoices"),
+        "{again}"
+    );
+}
+
+#[test]
+fn a_table_left_out_by_a_filter_is_not_reported_as_a_refusal() {
+    // Asking for one table and being told another was refused reads as a
+    // problem with the table you asked about. The reach figure was computed
+    // over it too.
+    let db = Db::start();
+    db.apply(
+        "CREATE TABLE wanted (id serial PRIMARY KEY, name text NOT NULL);
+         CREATE TABLE ignored (
+             id  serial PRIMARY KEY,
+             ref text NOT NULL CONSTRAINT ignored_ref CHECK (ref ~ '^X-[0-9]+$')
+         );",
+    );
+    let (_, report, code) = run(&db.url, &["--plan", "--include", "wanted"]);
+    assert_eq!(code, 0, "nothing asked for was refused: {report}");
+    assert!(!report.contains("ignored_ref"), "{report}");
+    assert!(report.contains("100% reach"), "{report}");
+}
+
+#[test]
+fn a_schema_that_is_not_there_says_so_rather_than_reporting_nothing() {
+    // "0 tables, 0 fillable" and exit 0 looks exactly like a schema that is
+    // genuinely empty, which is the one answer this tool must not give.
+    let db = Db::start();
+    db.apply("CREATE TABLE present (id serial PRIMARY KEY);");
+    let (_, report, _) = run(&db.url, &["--plan", "--schema", "nosuchschema"]);
+    assert!(
+        report.contains("no schema called nosuchschema"),
+        "{report}"
+    );
+}

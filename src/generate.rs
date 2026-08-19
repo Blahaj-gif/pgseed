@@ -361,7 +361,9 @@ pub fn value(
     // once here rather than inside `render`, which recurses through domains
     // and arrays and would otherwise re-derive it at every level.
     let noun = nouns::of(&column.name);
-    render(&mut rng, &column.type_, row, step, bounds, noun)
+    // And, for a number, whatever its name says about the size of it.
+    let range = nouns::numeric_range(&column.name);
+    render(&mut rng, &column.type_, row, step, bounds, noun, range)
 }
 
 fn render(
@@ -371,6 +373,7 @@ fn render(
     step: Option<usize>,
     bounds: &Bounds,
     noun: Option<Noun>,
+    range: Option<(i64, i64)>,
 ) -> Literal {
     let unique = step.is_some();
     let step = step.unwrap_or(row);
@@ -397,7 +400,23 @@ fn render(
             };
             // The column's own width and any CHECK ceiling, whichever binds.
             let ceiling = bounds.max.map_or(width, |m| m.min(width));
-            let floor = bounds.min.unwrap_or(0).max(0).min(ceiling);
+            let mut floor = bounds.min.unwrap_or(0).max(0).min(ceiling);
+            let mut ceiling = ceiling;
+            // What the column is called, where the name says something about
+            // the *size* of the number. Only when the value does not have to
+            // be distinct — a range of twenty holds twenty rows, and being
+            // plausible is worth much less than being unique.
+            if !unique {
+                if let Some((low, high)) = range {
+                    // Narrowed, never widened. A CHECK that already bounds the
+                    // column outranks a guess made from its name, and where
+                    // the two do not overlap the name is simply dropped.
+                    if low.max(floor) <= high.min(ceiling) {
+                        floor = low.max(floor);
+                        ceiling = high.min(ceiling);
+                    }
+                }
+            }
             let span = (ceiling - floor).max(1);
             // A unique column steps by row rather than rolling again, because
             // rolling twice in a small range collides sooner than anyone
@@ -694,7 +713,7 @@ fn render(
         }
 
         ColumnType::Domain { inner, .. } => {
-            render(rng, inner, row, step_of(unique, step), bounds, noun)
+            render(rng, inner, row, step_of(unique, step), bounds, noun, range)
         }
 
         // One element is enough to be a valid array, and a longer one only
@@ -706,7 +725,7 @@ fn render(
             // nine real schemas. Where the element type has no unambiguous
             // name to write, the array goes out uncast as before rather than
             // naming a type that might belong to another schema.
-            let Literal(inner) = render(rng, of, row, step_of(unique, step), bounds, noun);
+            let Literal(inner) = render(rng, of, row, step_of(unique, step), bounds, noun, range);
             match of.sql_name() {
                 Some(name) => Literal(format!("ARRAY[{inner}]::{name}[]")),
                 None => Literal(format!("ARRAY[{inner}]")),

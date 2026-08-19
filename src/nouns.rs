@@ -607,6 +607,44 @@ const USER_AGENT: [&str; 6] = [
 /// ends up in staging systems, and staging systems send mail.
 const DOMAIN: [&str; 3] = ["example.com", "example.org", "example.net"];
 
+/// A plausible range for a number, from what the column is called.
+///
+/// Separate from `Noun` because it answers a different question. A noun
+/// produces a value; this only narrows one, and the value is still drawn the
+/// ordinary way inside the range. Nothing here is a constraint and nothing
+/// here overrides one: the range is intersected with whatever the column and
+/// its CHECKs already allow, and dropped entirely if the two do not overlap.
+///
+/// It exists because `quantity` is the first column a reader's eye lands on
+/// and a smallint quantity of 13,630 is the kind of detail that decides
+/// whether anybody keeps reading. The set is deliberately small — these are
+/// names whose *magnitude* is unambiguous, which is a much shorter list than
+/// names whose meaning is.
+pub fn numeric_range(column: &str) -> Option<(i64, i64)> {
+    let name = column.trim_matches('_').to_ascii_lowercase();
+    let parts: Vec<&str> = name.split('_').filter(|p| !p.is_empty()).collect();
+    let last = *parts.last()?;
+
+    // Money held as an integer number of minor units: a `price_cents` of
+    // 861,209 is eight thousand pounds for one line item.
+    if matches!(last, "cents" | "pence" | "cent" | "minor") {
+        return Some((199, 49_999));
+    }
+    Some(match last {
+        "quantity" | "qty" | "count" | "units" | "seats" | "copies" => (1, 20),
+        "age" => (18, 80),
+        "rating" | "stars" | "score" if parts.len() == 1 => (1, 5),
+        "priority" | "rank" | "position" | "slot" | "sequence" | "sort" => (1, 10),
+        "retries" | "attempts" | "failures" | "errors" | "warnings" => (0, 5),
+        "percent" | "percentage" | "pct" => (0, 100),
+        "port" => (1024, 65_535),
+        "timeout" | "ttl" | "interval" | "delay" | "duration" => (1, 3_600),
+        "version" | "revision" | "generation" | "attempt" | "retry" => (1, 12),
+        "width" | "height" | "size" | "length" => (1, 4_096),
+        _ => return None,
+    })
+}
+
 /// Which noun a column name lands on, if any.
 ///
 /// Three passes, most specific first: the whole name, its last two segments,

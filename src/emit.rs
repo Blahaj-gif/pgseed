@@ -573,7 +573,7 @@ fn repair_cycles(schema: &Schema, verdict: &Verdict) -> Vec<String> {
             "UPDATE {child} AS c SET {column} = (SELECT p.{parent_column} \
              FROM {parent} AS p WHERE p.{parent_column} <> c.{own_key} \
              ORDER BY p.{parent_column} LIMIT 1) \
-             WHERE c.{own_key} <>                    (SELECT x.{own_key} FROM {child} AS x ORDER BY x.{own_key} LIMIT 1);",
+             WHERE c.{own_key} <> (SELECT x.{own_key} FROM {child} AS x ORDER BY x.{own_key} LIMIT 1);",
             child = table_id.quoted(),
             column = quote_ident(&fk.columns[0]),
             parent = fk.references.quoted(),
