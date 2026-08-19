@@ -225,6 +225,20 @@ pub fn overlapping_keys(table: &Table) -> Option<(String, String)> {
         .collect();
     for (index, first) in composite.iter().enumerate() {
         for second in &composite[index + 1..] {
+            // The same key written twice. Rails indexes a join table both ways
+            // round for query planning — `(group_id, user_id)` and
+            // `(user_id, group_id)` — and a unique constraint over a *set* of
+            // columns says the same thing whatever order it lists them in.
+            // Satisfying one satisfies the other, so there is nothing here for
+            // two odometers to contend over. Four of Discourse's tables were
+            // refused for arguing with themselves.
+            let (mut a, mut b) = (first.columns.clone(), second.columns.clone());
+            a.sort();
+            b.sort();
+            if a == b {
+                continue;
+            }
+
             let shared: Vec<&String> = first
                 .columns
                 .iter()

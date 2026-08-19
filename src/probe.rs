@@ -24,7 +24,7 @@
 //! Measured across the corpus before any of this was built:
 //!
 //! ```text
-//!   64.0%  reasoning alone
+//!   64.9%  reasoning alone
 //!   87.7%  with the database asked
 //! ```
 //!

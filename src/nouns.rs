@@ -650,6 +650,66 @@ pub fn numeric_range(column: &str) -> Option<(i64, i64)> {
 /// Three passes, most specific first: the whole name, its last two segments,
 /// then its last one. A name that matches nothing returns `None` and is filled
 /// the way everything used to be.
+/// The same question, with the table's name available to answer it.
+///
+/// A bare `name` is the commonest column in any schema and the most ambiguous:
+/// a project has one, a queue has one, and so does a person. The table settles
+/// it. Discourse's `users.name` was coming out as `Slate Systems` beside a
+/// `username` of `ursula.lindqvist` — each defensible alone and obviously
+/// wrong side by side.
+///
+/// Only for the columns that are ambiguous on their own. `file_name` is a file
+/// in a table of people too.
+pub fn of_in(table: &str, column: &str) -> Option<Noun> {
+    let plain = of(column);
+    if !matches!(plain, Some(Noun::Label)) {
+        return plain;
+    }
+    let name = column.trim_matches('_').to_ascii_lowercase();
+    if !matches!(name.as_str(), "name" | "full_name" | "fullname") {
+        return plain;
+    }
+    let table = table.trim_matches('_').to_ascii_lowercase();
+    let table = table.rsplit('.').next().unwrap_or(&table);
+    let about_people = matches!(
+        table,
+        "users"
+            | "user"
+            | "people"
+            | "person"
+            | "persons"
+            | "customers"
+            | "customer"
+            | "members"
+            | "member"
+            | "authors"
+            | "author"
+            | "employees"
+            | "employee"
+            | "staff"
+            | "contacts"
+            | "contact"
+            | "profiles"
+            | "profile"
+            | "students"
+            | "student"
+            | "teachers"
+            | "patients"
+            | "subscribers"
+            | "admins"
+            | "owners"
+            | "guests"
+            | "players"
+            | "attendees"
+            | "recipients"
+    );
+    if about_people {
+        Some(Noun::PersonName)
+    } else {
+        plain
+    }
+}
+
 pub fn of(column: &str) -> Option<Noun> {
     let name = column.trim_matches('_').to_ascii_lowercase();
     if let Some(noun) = exact(&name) {
@@ -1420,6 +1480,22 @@ mod tests {
                 "at {identity}"
             );
         }
+    }
+
+    #[test]
+    fn the_table_settles_what_a_bare_name_means() {
+        // The commonest column in any schema, and the most ambiguous one.
+        assert_eq!(of_in("users", "name"), Some(Noun::PersonName));
+        assert_eq!(of_in("customers", "full_name"), Some(Noun::PersonName));
+        assert_eq!(of_in("public.employees", "name"), Some(Noun::PersonName));
+        // A queue, a project, a tag: still a label.
+        assert_eq!(of_in("queues", "name"), Some(Noun::Label));
+        assert_eq!(of_in("projects", "name"), Some(Noun::Label));
+        // And a column that was never ambiguous is untouched, whatever table
+        // it sits in. A file in a table of people is still a file.
+        assert_eq!(of_in("users", "file_name"), Some(Noun::FileName));
+        assert_eq!(of_in("users", "email"), Some(Noun::Email));
+        assert_eq!(of_in("users", "queue_name"), Some(Noun::Slug));
     }
 
     #[test]

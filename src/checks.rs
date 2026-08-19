@@ -497,6 +497,44 @@ pub fn interpret(definition: &str) -> Meaning {
         }
     }
 
+    // `(col IS NOT NULL) OR ...` — satisfied by writing a value, whatever
+    // follows. The mirror of the rule below, and true for the same reason: a
+    // disjunction holds as soon as one side does, so guaranteeing the first
+    // one settles the whole thing without reading the rest.
+    //
+    // Discourse's `topics` carries
+    // `(category_id IS NOT NULL) OR (archetype <> 'regular')`, which refused
+    // the most central table in the schema over a rule that is satisfied by
+    // filling a column this fills anyway.
+    //
+    // Only as the *leading* branch, so `a = 1 OR (b IS NOT NULL)` cannot be
+    // read as a promise about `b`.
+    if let Some(rest) = expression.strip_prefix('(') {
+        if let Some((first, tail)) = rest.split_once(')') {
+            let tail = tail.trim_start();
+            // `(a IS NOT NULL) OR (b IS NOT NULL)` is at-least-one, which is
+            // the more useful reading: it leaves the generator free to satisfy
+            // the rule with either column rather than pinning it to the first.
+            // That rule is below, and this one stands aside for it.
+            let other_side_is_the_same_question = tail
+                .trim_start_matches("OR ")
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .trim()
+                .ends_with("IS NOT NULL");
+            if tail.starts_with("OR ") && !other_side_is_the_same_question {
+                if let Some(Some(column)) = first
+                    .strip_suffix("IS NOT NULL")
+                    .map(str::trim)
+                    .map(column_cast)
+                {
+                    return Meaning::NotNull { column };
+                }
+            }
+        }
+    }
+
     // `col = lower(col)`, with the casts Postgres prints. Both sides must name
     // the same column, or this is a comparison between two things and not a
     // statement about one.
@@ -1261,10 +1299,20 @@ mod tests {
                 columns: vec!["a".into(), "b".into(), "c".into()]
             }
         );
-        // A disjunction with anything else in it is not this shape. The first
-        // branch being `IS NULL` is a *nullable escape* and is read as one.
+        // A disjunction with something else on the right is not at-least-one,
+        // but it is not nothing either: guaranteeing the left branch settles
+        // the whole rule whatever the right one says. Discourse's `topics`
+        // carries `(category_id IS NOT NULL) OR (archetype <> 'regular')` and
+        // was refused over it — the most central table in the schema, held up
+        // by a rule satisfied by filling a column that gets filled anyway.
         assert_eq!(
             interpret("CHECK (((a IS NOT NULL) OR (b > 0)))"),
+            Meaning::NotNull { column: "a".into() }
+        );
+        // Only the leading branch, though. `a = 1 OR (b IS NOT NULL)` promises
+        // nothing about `b`.
+        assert_eq!(
+            interpret("CHECK (((a = 1) OR (b IS NOT NULL)))"),
             Meaning::Unknown
         );
     }

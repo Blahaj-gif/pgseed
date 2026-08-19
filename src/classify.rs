@@ -57,7 +57,7 @@ impl Refusal {
                 "foreign key \"{constraint}\" requires {table}, which is itself refused"
             ),
             Refusal::UnsatisfiableKeys { first, second } => format!(
-                "unique keys \"{first}\" and \"{second}\" share a column with no room                  to spare, so this cannot make both distinct at once"
+                "unique keys \"{first}\" and \"{second}\" share a column with no room to spare, so this cannot make both distinct at once"
             ),
             Refusal::DependsOnUnread { table, constraint } => format!(
                 "foreign key \"{constraint}\" requires {table}, which was not read — \
@@ -141,10 +141,25 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
             .all(|meaning| match meaning {
                 // Already true by construction, or a limit the generator honours.
                 Meaning::LengthLimit { column, .. }
-                | Meaning::NotNull { column }
                 | Meaning::ByteLength { column, .. }
                 | Meaning::LowerBound { column, .. }
                 | Meaning::Lowercase { column } => table.column(&column).is_some(),
+                // A column obliged to hold a value cannot also be obliged to
+                // be null, and a table can carry one rule of each over the
+                // same column. Discourse's `topics` does:
+                //
+                //   (category_id IS NOT NULL) OR (archetype <> 'regular')
+                //   (category_id IS NULL)     OR (archetype <> 'private_message')
+                //
+                // Each disjunction is satisfiable on its own, by filling the
+                // column or by nulling it. Both at once is not, and the way
+                // out — writing an `archetype` that is neither value — means
+                // solving the disjunction rather than recognising it. So this
+                // is refused, and the alternative was writing NULL and having
+                // the database reject the row, which is what it did.
+                Meaning::NotNull { column } => {
+                    table.column(&column).is_some() && !table.check_forces_null(&column)
+                }
                 // An obligation rather than a permission: satisfied by writing
                 // NULL, and therefore only satisfiable if the column may BE null.
                 // A NOT NULL column carrying `(col IS NULL) OR ...` genuinely

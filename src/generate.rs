@@ -360,7 +360,7 @@ pub fn value(
     // What the column is called, where that says something exact. Worked out
     // once here rather than inside `render`, which recurses through domains
     // and arrays and would otherwise re-derive it at every level.
-    let noun = nouns::of(&column.name);
+    let noun = nouns::of_in(&table.name, &column.name);
     // And, for a number, whatever its name says about the size of it.
     let range = nouns::numeric_range(&column.name);
     render(&mut rng, &column.type_, row, step, bounds, noun, range)

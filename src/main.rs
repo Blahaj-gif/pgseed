@@ -280,7 +280,7 @@ fn run() -> Result<std::process::ExitCode, String> {
             match emit::apply(&mut client, &read, &verdict, &options) {
                 Ok(n) => eprintln!("pgsow: applied {n} statements"),
                 // The transaction rolled back, so the database is as it was.
-                Err(e) => return Err(format!("nothing was written — {e}")),
+                Err(e) => return Err(format!("nothing was written — {}", explain(&e))),
             }
         }
     } else if args.plan {

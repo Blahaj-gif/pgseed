@@ -70,13 +70,13 @@ keeps what it accepts — see `--probe` below.
 | Temporal | 37 | 100% | 100% |
 | Plausible | 41 | 44% | 100% |
 | Mattermost *(replayed migrations)* | 80 | 94% | 100% |
-| Synapse | 134 | 98% | 99% |
+| Synapse | 134 | 99% | 99% |
 | PostgREST *(test fixtures — deliberately awkward)* | 134 | 96% | 98% |
 | Lago | 138 | 83% | 98% |
 | Sourcegraph *(frontend)* | 180 | 43% | 83% |
-| Discourse | 351 | 93% | 99% |
+| Discourse | 351 | 97% | 99% |
 | GitLab | 1,057 | 40% | 77% |
-| **total** | **2,353** | **64.0%** | **87.7%** |
+| **total** | **2,353** | **64.9%** | **87.7%** |
 
 Measured twice on separate runs, byte-identical both times, and the two
 harnesses — the corpus gate and the probe survey — now agree table for table.
@@ -121,7 +121,7 @@ savepoint makes that a question you can ask and take back.
 
 | | reach | GitLab | Sourcegraph |
 |---|---:|---:|---:|
-| reasoning alone | 64.0% | 40% | 43% |
+| reasoning alone | 64.9% | 40% | 43% |
 | with `--probe` | **87.7%** | **77%** | **83%** |
 
 Each table's INSERT goes in behind a savepoint. Kept, it stands; refused, it
@@ -165,7 +165,7 @@ writes SQL; `--plan` reports what it would do and writes nothing.
 Every row it produces is checked by the only authority that matters: a test
 generates for each corpus schema at the default fifty rows, applies the result
 to a real Postgres, and fails if a single statement is rejected. It currently
-generates **1,921 statements across the twenty schemas and Postgres accepts
+generates **1,940 statements across the twenty schemas and Postgres accepts
 every one** — with every one of their 456 triggers installed, and their 106
 partitioned tables read. The gate is zero, not a percentage — the whole thesis is that the
 database adjudicates, so one row it refuses is a failure rather than a figure
@@ -216,6 +216,7 @@ looking similar.
 | `col <= N`, `col < N`, `N <= col` | a ceiling or a floor on the number, either way round |
 | `col = 'X'` | one permitted value, which is a value set of one |
 | `A AND B` | both — and only when *both* are understood, because satisfying the half you recognise and ignoring the other is the silent pass this exists to avoid |
+| `(a IS NOT NULL) OR …` | fill `a`, which settles the disjunction whatever follows — unless another rule obliges the same column to be NULL, and then the pair has no satisfying row |
 | `col IS NOT NULL` | a column this never writes NULL into |
 | `octet_length(col) = N` / `<= N` | a fixed width, or a ceiling |
 | `col > N`, `col >= N` | a floor on the generated number |
@@ -275,6 +276,16 @@ Three properties hold, and each is a test rather than an intention:
   reserved domains, telephone numbers in the 555-01xx block reserved for
   fiction, and IP addresses in the RFC 5737 documentation ranges. Generated
   data ends up in staging systems, and staging systems send mail.
+
+The table gets a say where the column alone is ambiguous. `name` is the
+commonest column in any schema and could be a project, a queue or a person;
+in a table called `users` it is a person. Discourse's `users.name` was coming
+out as *Slate Systems* beside a `username` of *ada.adeyemi* — each defensible
+alone, and obviously wrong side by side.
+
+Numbers get the same treatment where their name fixes the *magnitude*:
+`quantity`, `age`, `port`, `percent`, anything ending in `cents`. It only ever
+narrows what the type and the CHECKs already allow.
 
 A column whose name says nothing exact — `value`, `data`, `payload` — still
 gets an ordinary word rather than a claim. And a value that will not fit the
