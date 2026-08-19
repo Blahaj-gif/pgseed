@@ -56,9 +56,14 @@ jobs:
       # `rust-version` in Cargo.toml is a promise to anybody running
       # `cargo install`. It said 1.75 for months and nothing had ever tried it,
       # which is the same kind of untested claim this project exists to avoid.
-      # Building the library and the binary is the promise; the test suite is
-      # not, because a dev-dependency may want more than a user does.
-      - run: cargo build --all-targets --locked
+      #
+      # The library and the binary, and deliberately not `--all-targets`: that
+      # pulls in dev-dependencies, and `postgresql_embedded` wants 1.87. A
+      # contributor running `cargo test` therefore needs a newer compiler than
+      # a user running `cargo install`, and this promise is the user's one.
+      # The first version of this job did use `--all-targets` and failed for
+      # exactly that reason, which is the job working.
+      - run: cargo build --locked
 
   database:
     name: against a real Postgres
