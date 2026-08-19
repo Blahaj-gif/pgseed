@@ -193,7 +193,7 @@ fn direct_refusals(table: &Table, schema: &Schema, order: &Order) -> Vec<Refusal
                 // the silent-pass this project exists to not do.
                 Meaning::MinLength { column, min } => table
                     .column(&column)
-                    .is_some_and(|c| ceiling_for(table, c).map_or(true, |max| max >= min)),
+                    .is_some_and(|c| ceiling_for(table, c).is_none_or(|max| max >= min)),
                 // One of a listed set of values, which is an enum written out
                 // longhand and satisfied the same way.
                 Meaning::ValueSet { column, values } => {

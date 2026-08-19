@@ -7,7 +7,14 @@ license = "MIT"
 repository = "https://github.com/Blahaj-gif/pgseed"
 keywords = ["postgres", "seed", "test-data", "fixtures", "database"]
 categories = ["command-line-utilities", "database"]
-rust-version = "1.75"
+# Verified, not guessed: CI builds with exactly this compiler on every
+# push. It used to say 1.75, which nothing had ever tried — and 1.75's
+# cargo cannot even fetch this crate's dependencies.
+rust-version = "1.85"
+# Build infrastructure a consumer of the crate has no use for. In
+# particular `rust-toolchain.toml` pins 1.94 for developing here, and
+# shipping it inside the package invites it to pin somebody else's build.
+exclude = [".github/", "rust-toolchain.toml"]
 
 [dependencies]
 # Postgres, synchronously. No async runtime: this is a CLI that does one job

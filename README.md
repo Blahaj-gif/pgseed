@@ -22,6 +22,12 @@ rows that break a rule nobody re-checks, so everything downstream is tested
 against data the real system would reject. This one never writes a row it
 cannot show satisfies every constraint it read, and says so when it cannot.
 
+![pgseed --plan listing the tables it will fill and naming the one it refuses,
+with the constraint quoted](docs/media/plan.svg)
+
+That is real output, against Sourcegraph's codeintel schema. The refused table
+is named, the rule is quoted, and nothing is written into it.
+
 Across 24 open-source schemas — 2,586 tables — Postgres accepted every row it
 generated. It fills 67% of those tables by reasoning alone, and 88% when it is
 allowed to ask the database. Where those come from and what they exclude is in

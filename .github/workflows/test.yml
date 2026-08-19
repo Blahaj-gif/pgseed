@@ -41,6 +41,25 @@ jobs:
       # where most of the logic lives and all of it is pure.
       - run: cargo test --lib
 
+  msrv:
+    name: the oldest compiler it claims to build on
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `rust-toolchain.toml` would override this, and the point here is to
+      # use a different compiler from the one it names.
+      - run: rm -f rust-toolchain.toml
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
+      # `rust-version` in Cargo.toml is a promise to anybody running
+      # `cargo install`. It said 1.75 for months and nothing had ever tried it,
+      # which is the same kind of untested claim this project exists to avoid.
+      # Building the library and the binary is the promise; the test suite is
+      # not, because a dev-dependency may want more than a user does.
+      - run: cargo build --all-targets --locked
+
   database:
     name: against a real Postgres
     runs-on: ubuntu-latest

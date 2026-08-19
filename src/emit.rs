@@ -491,7 +491,7 @@ pub fn for_each_statement(
             if identity == row && table.foreign_keys.len() == 1 {
                 if let Some(fk) = table.foreign_keys.first() {
                     if let Some(n) = counts.get(&fk.references).copied().filter(|n| *n > 0) {
-                        if pool.get(&fk.references).map_or(true, Vec::is_empty) {
+                        if pool.get(&fk.references).is_none_or(Vec::is_empty) {
                             identity = row % n;
                         }
                     }
