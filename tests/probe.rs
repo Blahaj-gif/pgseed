@@ -127,3 +127,83 @@ fn how_far_the_database_gets_us() {
         100.0 * (all_fillable + all_rescued) as f64 / all_tables.max(1) as f64,
     );
 }
+
+/// Which refused tables the database fills for you anyway.
+///
+/// A refusal is not always a loss. Zitadel's `login_names` is a *projection*:
+/// triggers on `users`, `org_domains` and the domain-policy tables write it,
+/// and a real Zitadel never inserts into it directly. Refusing it is therefore
+/// correct rather than cautious — a row written into it by hand would describe
+/// a login name derived from nothing, which is worse than no row at all.
+///
+/// So this counts, after a probed run, how many rows each still-refused table
+/// actually holds. A table with rows in it was populated by the database, and
+/// a refusal that costs nothing belongs in a different sentence from one that
+/// costs a table.
+///
+/// `PGSOW_ONLY=zitadel cargo test --test probe -- --ignored --nocapture fills_for_you`
+#[test]
+#[ignore]
+fn what_the_database_fills_for_you() {
+    let only = std::env::var("PGSOW_ONLY").unwrap_or_default();
+
+    for source in shared::sources() {
+        let name = &source.name;
+        if !only.is_empty() && !only.split(',').any(|want| want == name) {
+            continue;
+        }
+        let path = Path::new("tests/corpus").join(format!("{name}.sql"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+
+        let db = Db::start();
+        let mut client = db.client();
+        let schemas = shared::load(&mut client, &text);
+        let Ok(read) = pgsow::introspect::read(&mut client, &schemas) else {
+            continue;
+        };
+        let order = pgsow::graph::order(&read);
+        let verdict = pgsow::classify::classify(&read, &order);
+        let options = pgsow::emit::Options::flat(1, 5);
+
+        // Kept, not rolled back: the question is what is in the database
+        // afterwards, which is the thing a user would look at.
+        let Ok(outcome) = pgsow::probe::run(
+            &mut client,
+            &read,
+            &verdict,
+            &order,
+            &options,
+            true,
+            &mut |_| {},
+        ) else {
+            continue;
+        };
+
+        let mut filled_anyway = 0usize;
+        let mut still_empty = 0usize;
+        for rejected in &outcome.still_refused {
+            let count: i64 = client
+                .query_one(
+                    &format!("SELECT count(*) FROM {}", rejected.table.quoted()),
+                    &[],
+                )
+                .map(|row| row.get(0))
+                .unwrap_or(0);
+            if count > 0 {
+                filled_anyway += 1;
+                println!(
+                    "  {name}: {} holds {count} rows the database wrote",
+                    rejected.table
+                );
+            } else {
+                still_empty += 1;
+            }
+        }
+        println!(
+            "  {name}: {} refused after probing — {filled_anyway} filled by the database anyway, {still_empty} empty",
+            outcome.still_refused.len()
+        );
+    }
+}

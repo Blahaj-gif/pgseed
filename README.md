@@ -17,6 +17,16 @@ INSERT INTO "public"."users" ("email", "username", "first_name", "last_name", "t
   ('amara.adeyemi@example.org', 'amara.adeyemi', 'Amara', 'Adeyemi', 'America/Chicago');
 ```
 
+The way a seed tool goes wrong is not by crashing. It is by writing plausible
+rows that break a rule nobody re-checks, so everything downstream is tested
+against data the real system would reject. This one never writes a row it
+cannot show satisfies every constraint it read, and says so when it cannot.
+
+Across 24 open-source schemas — 2,586 tables — Postgres accepted every row it
+generated. It fills 67% of those tables by reasoning alone, and 88% when it is
+allowed to ask the database. Where those come from and what they exclude is in
+[How well it works](#how-well-it-works).
+
 ## Install
 
 ```
@@ -116,11 +126,7 @@ pgsow: 14 tables, 12 fillable, 2 refused (86% reach)
                  or one of its columns nullable, would be enough.
 ```
 
-That matters because the way a seed tool fails is not by crashing. It is by
-inserting plausible rows that quietly break a rule nobody re-checked, so
-everything downstream is tested against data the real system would reject.
-
-So a CHECK constraint is never evaluated. There is no expression parser and no
+A CHECK constraint is never evaluated. There is no expression parser and no
 guessing. There is a **closed set of exact shapes**, each with a satisfaction
 you can point at — a length limit, a value set, exactly-one-of-these-columns —
 and anything outside it refuses. Details and the full list:

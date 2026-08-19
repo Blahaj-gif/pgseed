@@ -237,6 +237,50 @@ permitted. It is still not done, for two practical reasons and one fact:
 If it is ever done, the conditions are already decided: a single documented
 command against a pinned commit, run in a sandbox rather than in the corpus job.
 
+## Zitadel's 17%, measured rather than assumed
+
+The obvious reading is that the INSERT triggers are the problem. They are not.
+Of Zitadel's 47 root refusals, **46 are on one table** — `users` — and 43 of
+those are a single CHECK shape:
+
+```sql
+CHECK (((type = 'machine') AND (email IS NULL)) OR (type = 'human'))
+CHECK (((type = 'machine') AND (last_name IS NULL)) OR ((type = 'human') AND (last_name <> '')))
+```
+
+A tagged union: one discriminant column decides which of the others must be
+NULL and which must be filled. Satisfying it means picking a value for `type`
+first and then reading every other CHECK in that light, which is a different
+shape of reasoning from anything in the closed set today.
+
+The trigger refusals are 12 of the 47, and refusing them is **correct rather
+than cautious**. `login_names` is a projection: `apply_user_insert_to_login_names`
+fires `AFTER INSERT ON users` and derives its rows from the user, the
+organisation's verified domains and the instance's domain setting. A row
+written into it directly would describe a login name derived from nothing,
+which is worse than no row. The right behaviour is to fill `users` and let the
+trigger fill `login_names`, which is exactly what happens the moment `users`
+becomes fillable.
+
+Measured, with `what_the_database_fills_for_you`: after a probed run, **0 of
+Zitadel's 17 still-refused tables hold any rows**. The triggers never fire
+because their source table is refused. So the whole schema turns on `users`,
+and `users` turns on the tagged union.
+
+Worth building? The count says be careful. The shape is **43 constraints in
+Zitadel, 4 in Sourcegraph and 1 in GitLab** — one schema, essentially. Unlocking
+`users` would gain it and about five pure dependents, roughly six tables of
+thirty, taking Zitadel's reasoning number to about where `--probe` already
+puts it and moving corpus reach by about 0.2 points.
+
+That is the same size as the two levers already abandoned here on evidence. It
+is left undone for now, with one caveat recorded honestly: this is the one
+place where corpus frequency and real-world frequency plausibly disagree —
+single-table inheritance is common in Rails and in hand-written Postgres, and
+twenty-four schemas containing one instance of it is weak evidence either way.
+
+---
+
 ## Left undone, deliberately
 
 - **Django, SQLAlchemy, TypeORM, Eloquent, Entity Framework.** No fetchable SQL
