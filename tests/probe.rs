@@ -98,7 +98,7 @@ fn how_far_the_database_gets_us() {
                     .or_default() += 1;
             }
             let mut ranked: Vec<_> = counted.into_iter().map(|(k, v)| (v, k)).collect();
-            ranked.sort_by(|a, b| b.0.cmp(&a.0));
+            ranked.sort_by_key(|entry| std::cmp::Reverse(entry.0));
             for (n, what) in ranked.iter().take(2000) {
                 println!(
                     "      {n:>3}  {}",

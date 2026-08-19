@@ -28,8 +28,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # No version here: rust-toolchain.toml decides, so CI and a laptop lint
+      # against the same compiler.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.94.0"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
@@ -43,7 +46,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@v2
       # `postgresql_embedded` downloads and starts its own server, so there is
       # no service container here and no version drift between CI and a laptop.
@@ -57,7 +62,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
