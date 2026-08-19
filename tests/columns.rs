@@ -43,13 +43,7 @@ fn what_the_text_columns_are_called() {
         };
         let db = Db::start();
         let mut client = db.client();
-        for schema_name in shared::schemas_in(&text) {
-            let _ =
-                client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";"));
-        }
-        for statement in shared::statements(&text) {
-            let _ = client.batch_execute(&statement);
-        }
+        let schemas = shared::load(&mut client, &text);
 
         // Text-typed, in a real or partitioned table, not a system column.
         let sql = "
@@ -63,7 +57,7 @@ fn what_the_text_columns_are_called() {
               AND NOT a.attisdropped
               AND t.typname IN ('text','varchar','bpchar','citext')
               AND n.nspname = ANY($1)";
-        let Ok(rows) = client.query(sql, &[&shared::schemas_in(&text)]) else {
+        let Ok(rows) = client.query(sql, &[&schemas]) else {
             continue;
         };
         for row in &rows {

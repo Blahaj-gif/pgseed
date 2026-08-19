@@ -30,13 +30,7 @@ fn what_the_triggers_do() {
         };
         let db = Db::start();
         let mut client = db.client();
-        for schema_name in shared::schemas_in(&text) {
-            let _ =
-                client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";"));
-        }
-        for statement in shared::statements(&text) {
-            let _ = client.batch_execute(&statement);
-        }
+        let schemas = shared::load(&mut client, &text);
 
         // Row-level triggers that fire on insert are the only ones that can
         // refuse a row this writes. A statement-level trigger, or one that
@@ -51,7 +45,7 @@ fn what_the_triggers_do() {
               AND (t.tgtype & 1) <> 0      -- row level
               AND (t.tgtype & 4) <> 0      -- fires on INSERT
               AND n.nspname = ANY($1)";
-        let Ok(rows) = client.query(sql, &[&shared::schemas_in(&text)]) else {
+        let Ok(rows) = client.query(sql, &[&schemas]) else {
             continue;
         };
 

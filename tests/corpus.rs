@@ -249,6 +249,18 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Coverage {
         }
     }
 
+    // `pg_dump` blanks the search path for the whole session and four of these
+    // files are `pg_dump` output. Left blank, any trigger body naming a table
+    // without qualifying it fails with `relation ... does not exist`, which is
+    // a fact about this harness and not about the schema. Put back to what a
+    // real connection has.
+    let path: Vec<String> = schemas
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .chain(["public".to_string()])
+        .collect();
+    let _ = client.batch_execute(&format!("SET search_path TO {};", path.join(", ")));
+
     // A ceiling rather than a printout. Every loss here has been read and has
     // a cause: five are constraints on tables that failed to create, so they
     // never enter the denominator and cost nothing, and GitLab's two are
@@ -521,14 +533,8 @@ fn survey_the_checks_this_does_not_understand() {
         };
         let db = Db::start();
         let mut client = db.client();
-        for schema_name in schemas_in(&text) {
-            let _ =
-                client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";"));
-        }
-        for statement in statements(&text) {
-            let _ = client.batch_execute(&statement);
-        }
-        let Ok(schema) = pgsow::introspect::read(&mut client, &schemas_in(&text)) else {
+        let schemas = corpus_shared::load(&mut client, &text);
+        let Ok(schema) = pgsow::introspect::read(&mut client, &schemas) else {
             continue;
         };
         for table in schema.tables.values() {

@@ -87,6 +87,61 @@ impl Emitter<'_> {
     }
 }
 
+/// The value a table *will* write for one of its columns, worked out without
+/// having written it.
+///
+/// Only for a foreign key that points into a cycle being populated by deferring
+/// the constraints to commit. There the child is written before the parent on
+/// purpose, so the pool is empty and the usual routes are shut: there is no row
+/// to borrow from the database either, because the parent has none yet.
+///
+/// It works because nothing about generation depends on order. A cell's value
+/// comes from `(seed, table, column, row)` and from that table's own bounds and
+/// unique keys, all of which are known now. So the parent's key is computed
+/// exactly as the parent will compute it, and the two agree because they are
+/// the same function of the same arguments.
+///
+/// `None` where the parent's key is not something this writes — a serial, an
+/// identity column, a default. Those are chosen by the database at insert time,
+/// and there is no way to know one in advance that does not amount to guessing
+/// what a sequence will hand out.
+fn planned_key(
+    schema: &Schema,
+    fk: &crate::schema::ForeignKey,
+    referenced: &str,
+    row: usize,
+    counts: &BTreeMap<TableId, usize>,
+    options: &Options,
+) -> Option<Literal> {
+    let parent = schema.get(&fk.references)?;
+    let column = parent.column(referenced)?;
+    if column.is_generated || column.has_default {
+        return None;
+    }
+    if !writable(parent).iter().any(|c| c.name == column.name) {
+        return None;
+    }
+    // Wrapped on how many rows the parent is going to hold, so this names one
+    // of them rather than one past the end.
+    let parent_rows = counts
+        .get(&fk.references)
+        .copied()
+        .unwrap_or_else(|| options.rows.for_table(&fk.references));
+    if parent_rows == 0 {
+        return None;
+    }
+    let bounds = bounds_for(parent);
+    let varying = crate::volume::variations(parent);
+    Some(value(
+        options.seed,
+        &fk.references,
+        column,
+        row % parent_rows,
+        bounds.get(&column.name).unwrap_or(&Bounds::default()),
+        varying.get(&column.name).copied(),
+    ))
+}
+
 /// Values already written for a table's primary key, so children can point at
 /// them. Keyed by column, because a composite key has to be drawn as a *row*
 /// rather than column by column — picking `tenant_id` from one parent and
@@ -406,6 +461,31 @@ pub fn for_each_statement(
                     borrowed.clone()
                 } else if let Some(lookup) = borrow_from_database(table, column, row, schema) {
                     lookup
+                } else if let Some(planned) = table
+                    .foreign_keys
+                    .iter()
+                    .filter(|fk| fk.columns.contains(&column.name))
+                    // Only where the check really is deferred to commit. A
+                    // cycle broken by nulling instead has its keys checked the
+                    // instant the row lands, so naming a row the parent has not
+                    // written yet is a violation rather than a forward
+                    // reference — which is exactly what a ring of ten tables
+                    // demonstrated the first time this was let loose on all of
+                    // them.
+                    .filter(|fk| fk.deferrable && verdict.deferred_constraints)
+                    .find_map(|fk| {
+                        let at = fk.columns.iter().position(|c| *c == column.name)?;
+                        let referenced = fk.referenced_columns.get(at)?;
+                        planned_key(schema, fk, referenced, row, &counts, options)
+                    })
+                {
+                    // A cycle whose constraints are deferred to commit: the
+                    // parent has not been written yet and will be, with exactly
+                    // this key. Writing NULL here instead is what a NOT NULL
+                    // column in a deferrable ring used to get, and the database
+                    // rejected the row — a promise `classify` had made and the
+                    // generator could not keep.
+                    planned
                 } else if table
                     .foreign_keys
                     .iter()

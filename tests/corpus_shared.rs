@@ -165,3 +165,35 @@ fn next_semicolon(text: &str, quoted: &mut bool) -> Option<usize> {
     }
     None
 }
+
+/// Load a schema dump, and leave the session the way a real one would be.
+///
+/// Four of the twenty corpus files are `pg_dump` output, and `pg_dump` writes
+/// `SELECT pg_catalog.set_config('search_path', '', false)` near the top. The
+/// `false` makes it a session setting rather than a transaction one, so it
+/// outlives the load and applies to everything the test does afterwards.
+///
+/// That was not harmless. Plausible's `sites` table carries a trigger whose
+/// body says `SELECT 1 FROM sites` without qualifying it, which is ordinary
+/// and correct — and with an empty search path it fails with `42P01 relation
+/// "sites" does not exist`. Every measurement of that table was therefore
+/// measuring the harness. A real connection has `"$user", public`, so the
+/// search path is put back to something real before anything is asked of the
+/// database.
+pub fn load(client: &mut postgres::Client, sql: &str) -> Vec<String> {
+    let schemas = schemas_in(sql);
+    for name in &schemas {
+        let _ = client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{name}\";"));
+    }
+    for statement in statements(sql) {
+        let _ = client.batch_execute(&statement);
+    }
+
+    let path: Vec<String> = schemas
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .chain(["public".to_string()])
+        .collect();
+    let _ = client.batch_execute(&format!("SET search_path TO {};", path.join(", ")));
+    schemas
+}

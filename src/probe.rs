@@ -70,8 +70,22 @@ pub struct Outcome {
     /// Tables that reasoning refused and the database accepted.
     pub rescued: Vec<TableId>,
     /// Tables still refused, now on the database's authority rather than this
-    /// tool's caution.
-    pub still_refused: Vec<TableId>,
+    /// tool's caution, each with what the database said.
+    pub still_refused: Vec<Rejected>,
+}
+
+/// A table the database would not take, and its reason for it.
+///
+/// The reason is worth keeping rather than counting. A refusal this tool
+/// cannot explain is a refusal nobody can act on, and "23514 violates
+/// events_rate_limit" tells a reader which constraint to look at in a way that
+/// "still refused" never will.
+#[derive(Debug, Clone)]
+pub struct Rejected {
+    pub table: TableId,
+    /// The SQLSTATE, where Postgres gave one.
+    pub code: String,
+    pub message: String,
 }
 
 impl Outcome {
@@ -169,7 +183,15 @@ pub fn run(
                         Took::Stop
                     }
                     Some(id) => {
-                        outcome.still_refused.push(id.clone());
+                        let (code, message) = match e.as_db_error() {
+                            Some(db) => (db.code().code().to_string(), db.message().to_string()),
+                            None => ("".to_string(), e.to_string()),
+                        };
+                        outcome.still_refused.push(Rejected {
+                            table: id.clone(),
+                            code,
+                            message,
+                        });
                         // Rejected rather than merely "carry on": the rows this
                         // would have written are not there, and a child must
                         // not be handed their keys.

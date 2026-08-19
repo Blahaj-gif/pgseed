@@ -251,6 +251,103 @@ fn split_top_all(text: &str) -> Vec<&str> {
     out
 }
 
+/// Split on every top-level occurrence of a keyword operator.
+///
+/// Parentheses and quotes are respected, so the `OR` inside
+/// `(a AND (b OR c))` is not a top-level one and the split does not find it.
+fn split_keyword<'t>(text: &'t str, operator: &str) -> Vec<&'t str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start, mut quoted) = (0i32, 0usize, false);
+    let mut index = 0usize;
+    let bytes = text.as_bytes();
+    while index < bytes.len() {
+        match bytes[index] {
+            0x27 => quoted = !quoted,
+            b'(' if !quoted => depth += 1,
+            b')' if !quoted => depth -= 1,
+            _ if !quoted && depth == 0 && text[index..].starts_with(operator) => {
+                out.push(&text[start..index]);
+                index += operator.len();
+                start = index;
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    out.push(&text[start..]);
+    out
+}
+
+/// `((a IS NOT NULL) AND (b IS NULL)) OR ((a IS NULL) AND (b IS NOT NULL))`,
+/// and the same for any number of columns.
+///
+/// Returns the columns only when the disjunction is a **complete** cover: the
+/// same column set in every branch, exactly one of them non-null in each, and
+/// every column filling that role in exactly one branch. That is precisely
+/// `num_nonnulls(a, b, ...) = 1` and is satisfied the same way.
+///
+/// A partial cover — three columns but only two branches — is a narrower
+/// obligation that says *these* two may hold the value and the third may not.
+/// It is perfectly satisfiable and it is not this, so it returns nothing and
+/// its table is refused rather than filled on a guess about which column is
+/// allowed to be the filled one.
+fn exactly_one_longhand(expression: &str) -> Option<Vec<String>> {
+    let branches = split_keyword(expression, " OR ");
+    if branches.len() < 2 {
+        return None;
+    }
+
+    let mut filled: Vec<String> = Vec::new();
+    let mut columns: Option<std::collections::BTreeSet<String>> = None;
+
+    for branch in branches {
+        let mut here: std::collections::BTreeSet<String> = Default::default();
+        let mut here_filled: Option<String> = None;
+
+        for term in split_keyword(unwrap_parens(branch.trim()), " AND ") {
+            let text = unwrap_parens(term.trim()).trim();
+            let (column, holds_a_value) = if let Some(rest) = text.strip_suffix("IS NOT NULL") {
+                (column_cast(rest.trim())?, true)
+            } else if let Some(rest) = text.strip_suffix("IS NULL") {
+                (column_cast(rest.trim())?, false)
+            } else {
+                return None;
+            };
+            // A column named twice in one branch is saying two things about
+            // itself and this is not going to work out which.
+            if !here.insert(column.clone()) {
+                return None;
+            }
+            if holds_a_value {
+                if here_filled.is_some() {
+                    return None;
+                }
+                here_filled = Some(column);
+            }
+        }
+
+        let here_filled = here_filled?;
+        match &columns {
+            None => columns = Some(here),
+            Some(seen) if *seen == here => {}
+            // Different branches over different columns. Whatever that means,
+            // it is not this.
+            Some(_) => return None,
+        }
+        if filled.contains(&here_filled) {
+            return None;
+        }
+        filled.push(here_filled);
+    }
+
+    let columns = columns?;
+    if columns.len() < 2 || filled.len() != columns.len() {
+        return None;
+    }
+    Some(columns.into_iter().collect())
+}
+
 /// Read a constraint definition, and say what it means only when that is
 /// beyond doubt.
 ///
@@ -267,6 +364,18 @@ pub fn interpret(definition: &str) -> Meaning {
 
     if let Some(Some(column)) = expression.strip_suffix("IS NOT NULL").map(column_name) {
         return Meaning::NotNull { column };
+    }
+
+    // Exactly one of them holds a value, written out longhand:
+    //
+    //   ((a IS NOT NULL) AND (b IS NULL)) OR ((a IS NULL) AND (b IS NOT NULL))
+    //
+    // A third spelling of `num_nonnulls(a, b) = 1`, and the one an application
+    // written by hand tends to reach for. Placed before the `(col IS NULL) OR`
+    // rule below, because a disjunct beginning `(a IS NULL)` would otherwise
+    // be read as licence to null that column out and nothing else.
+    if let Some(columns) = exactly_one_longhand(expression) {
+        return Meaning::ExactlyOneNonNull { columns };
     }
 
     // `(col IS NULL) OR ...` — satisfied by writing NULL, whatever follows.
@@ -692,6 +801,51 @@ mod tests {
             interpret("CHECK ((status <> ANY (ARRAY['a'::text])))"),
             Meaning::Unknown
         );
+    }
+
+    #[test]
+    fn exactly_one_of_them_is_recognised_written_out_longhand() {
+        // A third spelling of `num_nonnulls(a, b) = 1`. Plausible writes it
+        // this way and so does GitLab, over three columns.
+        assert_eq!(
+            interpret(
+                "CHECK ((((event_name IS NOT NULL) AND (page_path IS NULL)) OR \
+                 ((event_name IS NULL) AND (page_path IS NOT NULL))))"
+            ),
+            Meaning::ExactlyOneNonNull {
+                columns: vec!["event_name".into(), "page_path".into()]
+            }
+        );
+        assert_eq!(
+            interpret(
+                "CHECK ((((access_level IS NOT NULL) AND (group_id IS NULL) AND (user_id IS NULL)) \
+                 OR ((user_id IS NOT NULL) AND (access_level IS NULL) AND (group_id IS NULL)) OR \
+                 ((group_id IS NOT NULL) AND (user_id IS NULL) AND (access_level IS NULL))))"
+            ),
+            Meaning::ExactlyOneNonNull {
+                columns: vec!["access_level".into(), "group_id".into(), "user_id".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn a_longhand_disjunction_that_is_not_a_complete_cover_is_refused() {
+        for definition in [
+            // Three columns, two branches: this says `c` may never be the one
+            // holding the value, which is a narrower rule and not this one.
+            "CHECK ((((a IS NOT NULL) AND (b IS NULL) AND (c IS NULL)) OR \
+             ((b IS NOT NULL) AND (a IS NULL) AND (c IS NULL))))",
+            // Branches over different column sets.
+            "CHECK ((((a IS NOT NULL) AND (b IS NULL)) OR ((c IS NULL) AND (d IS NOT NULL))))",
+            // Two non-nulls in one branch is at-least-two, not exactly-one.
+            "CHECK ((((a IS NOT NULL) AND (b IS NOT NULL)) OR ((a IS NULL) AND (b IS NULL))))",
+            // The same column filling the role twice.
+            "CHECK ((((a IS NOT NULL) AND (b IS NULL)) OR ((a IS NOT NULL) AND (b IS NULL))))",
+            // Something that is not a null test at all.
+            "CHECK ((((a IS NOT NULL) AND (b = 1)) OR ((a IS NULL) AND (b IS NOT NULL))))",
+        ] {
+            assert_eq!(interpret(definition), Meaning::Unknown, "{definition}");
+        }
     }
 
     #[test]

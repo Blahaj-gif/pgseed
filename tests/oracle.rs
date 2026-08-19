@@ -950,7 +950,7 @@ fn a_check_outside_the_closed_set_is_kept_when_the_database_allows_it() {
     let refused: Vec<String> = outcome
         .still_refused
         .iter()
-        .map(|id| id.name.clone())
+        .map(|r| r.table.name.clone())
         .collect();
     assert_eq!(rescued, vec!["tags".to_string()], "refused: {refused:?}");
     assert_eq!(refused, vec!["notes".to_string()]);

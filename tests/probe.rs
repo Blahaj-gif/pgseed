@@ -38,15 +38,8 @@ fn how_far_the_database_gets_us() {
 
         let db = Db::start();
         let mut client = db.client();
-        for schema_name in shared::schemas_in(&text) {
-            let _ =
-                client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";"));
-        }
-        for statement in shared::statements(&text) {
-            let _ = client.batch_execute(&statement);
-        }
+        let schemas = shared::load(&mut client, &text);
 
-        let schemas = shared::schemas_in(&text);
         let Ok(read) = pgsow::introspect::read(&mut client, &schemas) else {
             continue;
         };
@@ -74,6 +67,45 @@ fn how_far_the_database_gets_us() {
                 continue;
             }
         };
+
+        // With one schema named, the point is diagnosis rather than a number:
+        // first what reasoning refused on its own terms, since a root refusal
+        // is worth twenty of the refusals it causes.
+        if !only.is_empty() {
+            for (id, reasons) in &verdict.refused {
+                for reason in reasons {
+                    let line = reason.explain();
+                    if !line.contains("which is itself refused") {
+                        println!(
+                            "      ROOT  {id}: {}",
+                            line.chars().take(150).collect::<String>()
+                        );
+                    }
+                }
+            }
+        }
+
+        // Then what the database said about the ones probing could not save:
+        // what is still refused, and what the database said about it.
+        if !only.is_empty() {
+            let mut counted: std::collections::BTreeMap<String, usize> = Default::default();
+            for rejected in &outcome.still_refused {
+                *counted
+                    .entry(format!(
+                        "{} — {} {}",
+                        rejected.table, rejected.code, rejected.message
+                    ))
+                    .or_default() += 1;
+            }
+            let mut ranked: Vec<_> = counted.into_iter().map(|(k, v)| (v, k)).collect();
+            ranked.sort_by(|a, b| b.0.cmp(&a.0));
+            for (n, what) in ranked.iter().take(20) {
+                println!(
+                    "      {n:>3}  {}",
+                    what.chars().take(110).collect::<String>()
+                );
+            }
+        }
 
         let total = verdict.total();
         all_tables += total;

@@ -40,29 +40,39 @@ hold rows** — two facts a person can answer instantly and a tool cannot.
 
 ## Reach, on twenty schemas nobody here wrote
 
-| schema | tables | fillable | reach |
+Two numbers, because there are two kinds of confidence. **Reasoning** is what
+this can show is right by reading the schema alone, and needs no write access.
+**Probing** offers each refused table to the database behind a savepoint and
+keeps what it accepts — see `--probe` below.
+
+| schema | tables | by reasoning | with `--probe` |
 |---|---:|---:|---:|
-| PowerDNS | 7 | 7 | 100% |
-| Hasura | 8 | 6 | 75% |
-| Kong | 9 | 8 | 89% |
-| Sourcegraph *(codeintel)* | 13 | 10 | 77% |
-| Harbor | 21 | 21 | 100% |
-| listmonk | 16 | 16 | 100% |
-| Ory Kratos *(replayed migrations)* | 23 | 23 | 100% |
-| Ory Hydra *(replayed migrations)* | 18 | 15 | 83% |
-| Sourcegraph *(insights)* | 21 | 17 | 81% |
-| hex.pm | 36 | 22 | 61% |
-| Vaultwarden *(replayed migrations)* | 29 | 29 | 100% |
-| Temporal | 37 | 36 | 97% |
-| Plausible | 41 | 18 | 44% |
-| Mattermost *(replayed migrations)* | 80 | 75 | 94% |
-| PostgREST *(test fixtures — deliberately awkward)* | 134 | 129 | 96% |
-| Synapse | 134 | 126 | 94% |
-| Lago | 138 | 115 | 83% |
-| Sourcegraph *(frontend)* | 180 | 75 | 42% |
-| Discourse | 351 | 324 | 92% |
-| GitLab | 1,057 | 420 | 40% |
-| **total** | **2,353** | **1,492** | **63%** |
+| PowerDNS | 7 | 100% | 100% |
+| Hasura | 8 | 75% | 75% |
+| Kong | 9 | 89% | 89% |
+| Sourcegraph *(codeintel)* | 13 | 77% | 92% |
+| Ory Hydra *(replayed migrations)* | 14 | 93% | 93% |
+| listmonk | 16 | 100% | 100% |
+| Harbor | 21 | 100% | 100% |
+| Sourcegraph *(insights)* | 21 | 81% | 95% |
+| Ory Kratos *(replayed migrations)* | 23 | 100% | 100% |
+| Vaultwarden *(replayed migrations)* | 28 | 100% | 100% |
+| hex.pm | 36 | 61% | 100% |
+| Temporal | 37 | 97% | 97% |
+| Plausible | 42 | 45% | 100% |
+| Mattermost *(replayed migrations)* | 81 | 94% | 100% |
+| Synapse | 134 | 94% | 96% |
+| PostgREST *(test fixtures — deliberately awkward)* | 135 | 94% | 97% |
+| Lago | 138 | 83% | 98% |
+| Sourcegraph *(frontend)* | 180 | 42% | 83% |
+| Discourse | 351 | 93% | 99% |
+| GitLab | 1,057 | 40% | 77% |
+| **total** | **2,351** | **63.3%** | **87.2%** |
+
+Measured twice, on separate runs, byte-identical both times. The corpus gate
+loads the same schemas through a stricter filter and counts 2,353 tables at
+63.5% — a two-table difference between two harnesses reading the same dumps,
+reported rather than reconciled away.
 
 Fetched with `python tests/corpus/fetch.py`; sources and licences in
 `tests/corpus/sources.json`. Three are *replayed* migration directories rather
@@ -88,8 +98,8 @@ savepoint makes that a question you can ask and take back.
 
 | | reach | GitLab | Sourcegraph |
 |---|---:|---:|---:|
-| reasoning alone | 63.2% | 40% | 42% |
-| with `--probe` | **86.2%** | **77%** | **83%** |
+| reasoning alone | 63.3% | 40% | 42% |
+| with `--probe` | **87.2%** | **77%** | **83%** |
 
 Each table's INSERT goes in behind a savepoint. Kept, it stands; refused, it
 rolls back and the refusal is reported exactly as before. Without `--apply` the
@@ -132,7 +142,7 @@ writes SQL; `--plan` reports what it would do and writes nothing.
 Every row it produces is checked by the only authority that matters: a test
 generates for each corpus schema at the default fifty rows, applies the result
 to a real Postgres, and fails if a single statement is rejected. It currently
-generates **1,906 statements across the twenty schemas and Postgres accepts
+generates **1,908 statements across the twenty schemas and Postgres accepts
 every one** — with every one of their 456 triggers installed, and their 106
 partitioned tables read. The gate is zero, not a percentage — the whole thesis is that the
 database adjudicates, so one row it refuses is a failure rather than a figure
@@ -185,6 +195,7 @@ looking similar.
 |---|---|
 | `char_length(col) <= N` | what `varchar(N)` already means |
 | `char_length(col) >= N`, `> N` | padded up to, where the column has room, and refused where it has not |
+| `(a IS NOT NULL AND b IS NULL) OR (a IS NULL AND b IS NOT NULL)` | exactly-one, written longhand — fill one, NULL the rest |
 | `col IS NOT NULL` | a column this never writes NULL into |
 | `octet_length(col) = N` / `<= N` | a fixed width, or a ceiling |
 | `col > N`, `col >= N` | a floor on the generated number |
@@ -295,6 +306,34 @@ claimed 68 seconds for a job that takes ten.
 
 The SQL is streamed a statement at a time rather than built and then written,
 so the last row of that table is a file size and not a memory requirement.
+
+## Stress tests
+
+Three things a percentage cannot answer, kept apart from the corpus because
+they are hand-written on purpose and earn it by testing what the corpus is
+*thin* on rather than what it covers well.
+
+- **All-or-nothing constraints** — every spelling of exactly-one-of-these
+  columns, an exclusion constraint, a partial unique index, a length floor
+  above its own ceiling, and a disjunction that is *not* a complete cover.
+  Each is either satisfied and applied to a real database, or refused by name.
+- **Circular foreign keys at scale** — a ring of ten, two rings sharing a
+  table, a self-reference, a deferrable ring, and a rigid one. Filling is not
+  enough: a `next_id` that is null on every row is valid SQL and has modelled
+  nothing, so the repair is checked too.
+- **Determinism, including under probing** — probing consults a live database,
+  which makes it the one part of this tool whose answer could depend on
+  something other than the seed. Two fresh databases, same seed: the rescued
+  set and the accepted SQL must match, and everything a plain run wrote must
+  appear unchanged in the probed one.
+
+The second of those found a real bug on its first run. A ring where every key
+is NOT NULL *and* deferrable is populated by deferring the constraints to
+commit, and the row written first pointed at a parent that did not exist yet —
+so it got NULL, and the database rejected it. Nothing in the corpus has that
+shape. The fix computes the key the parent *will* write, which is knowable
+because a cell's value depends on `(seed, table, column, row)` and not on the
+order anything happens in.
 
 ## Testing
 
