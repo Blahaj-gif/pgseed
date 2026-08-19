@@ -21,28 +21,7 @@ use pgseed::{classify, dsn, emit, filter, graph, introspect};
 /// least useful sentence available at the moment it matters most: the first
 /// thing a new user gets wrong is the connection string, and `cannot connect:
 /// db error` tells them nothing about which part.
-fn explain(e: &postgres::Error) -> String {
-    match e.as_db_error() {
-        Some(db) => {
-            let mut out = db.message().to_string();
-            if let Some(detail) = db.detail() {
-                out.push_str(&format!("\n       {detail}"));
-            }
-            if let Some(hint) = db.hint() {
-                out.push_str(&format!("\n       {hint}"));
-            }
-            out
-        }
-        // Not the database refusing, but the connection never reaching it.
-        None => {
-            let mut cause: &dyn std::error::Error = e;
-            while let Some(next) = cause.source() {
-                cause = next;
-            }
-            cause.to_string()
-        }
-    }
-}
+use pgseed::dberror::explain;
 
 #[derive(Parser)]
 #[command(
@@ -156,6 +135,34 @@ fn run() -> Result<std::process::ExitCode, String> {
         for row in &rows {
             let missing: String = row.get(0);
             eprintln!("pgseed: there is no schema called {missing}");
+        }
+    }
+
+    // And the schema that exists and is empty, while the tables are somewhere
+    // else. Hasura keeps its catalog in `hdb_catalog` and Zitadel in
+    // `zitadel`, so pointing this at either with the default `--schema public`
+    // printed "0 tables, 0 fillable" and exited 0. That reads as "your
+    // database is empty", which is a different and wrong answer.
+    if read.is_empty() {
+        if let Ok(rows) = client.query(
+            "SELECT ns.nspname, count(*) FROM pg_class c              JOIN pg_namespace ns ON ns.oid = c.relnamespace              WHERE c.relkind IN ('r', 'p')                AND ns.nspname NOT IN ('pg_catalog', 'information_schema')                AND ns.nspname <> ALL($1::text[])              GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 5",
+            &[&args.schema],
+        ) {
+            let elsewhere: Vec<String> = rows
+                .iter()
+                .map(|row| {
+                    let name: String = row.get(0);
+                    let held: i64 = row.get(1);
+                    format!("{name} ({held})")
+                })
+                .collect();
+            if !elsewhere.is_empty() {
+                eprintln!(
+                    "pgseed: no tables in {}, but there are tables in {} — pass --schema to read one of those",
+                    args.schema.join(", "),
+                    elsewhere.join(", ")
+                );
+            }
         }
     }
 

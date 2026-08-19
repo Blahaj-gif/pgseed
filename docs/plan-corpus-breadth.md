@@ -281,6 +281,26 @@ twenty-four schemas containing one instance of it is weak evidence either way.
 
 ---
 
+## What running the incumbent found
+
+The comparison against Snaplet seed is in
+[versus-snaplet-seed.md](versus-snaplet-seed.md). It was run to make a claim
+honest — this project had never measured the alternative it says it improves on
+— and it paid for itself in bugs, all three of them in the binary rather than
+the library, which is why the corpus had never seen them:
+
+- **A deferred foreign key is not checked by a savepoint.** `--probe` kept rows
+  the database had not actually validated, and COMMIT then failed on
+  Sourcegraph, losing a whole run. Nothing invalid persisted, but 180 tables
+  filled zero. The check is forced inside the savepoint now, and Sourcegraph
+  fills 151.
+- **A failure printed as `db error`.** The explainer that fixes that lived in
+  the binary while the failure happened in the library. One copy now.
+- **A silent zero when the tables are in another schema.** Hasura keeps its in
+  `hdb_catalog` and Zitadel in `zitadel`; with the default `--schema public`
+  both reported "0 tables" and exited 0, which reads as an empty database. It
+  now names the schemas that do hold tables.
+
 ## Left undone, deliberately
 
 - **Django, SQLAlchemy, TypeORM, Eloquent, Entity Framework.** No fetchable SQL

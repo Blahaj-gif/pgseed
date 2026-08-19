@@ -140,6 +140,7 @@ pub fn run(
 
     let mut outcome = Outcome::default();
     let mut broken_promise: Option<String> = None;
+    let deferring = verdict.deferred_constraints;
 
     emit::for_each_statement(schema, &optimistic, options, &mut |written| {
         // Everything is savepointed, including the statements that belong to
@@ -151,7 +152,34 @@ pub fn run(
             broken_promise = Some("the transaction stopped accepting savepoints".into());
             return Took::Stop;
         }
-        match transaction.batch_execute(written.sql) {
+        // A row landing is not the same as a row being checked. A constraint
+        // declared DEFERRABLE INITIALLY DEFERRED is not looked at until
+        // COMMIT, so the database accepting this INSERT inside a savepoint has
+        // shown nothing about it — and `--probe`'s whole claim is that what it
+        // keeps was shown. Sourcegraph made the point: every probed row was
+        // accepted, and COMMIT then failed on a deferred foreign key, losing
+        // the entire run.
+        //
+        // So the check is forced here, while the savepoint can still take the
+        // row back. Forcing it can also fail because a cycle repair is
+        // legitimately mid-flight, and that costs a refusal rather than a
+        // wrong row — the direction an error in this has to point.
+        let deferred_here = written
+            .table
+            .and_then(|id| schema.get(id))
+            .is_some_and(|table| table.foreign_keys.iter().any(|fk| fk.deferrable));
+        let inserted = transaction.batch_execute(written.sql).and_then(|()| {
+            if deferred_here {
+                transaction.batch_execute("SET CONSTRAINTS ALL IMMEDIATE")?;
+                // Put the session back the way the emitter left it, or the
+                // rest of a deferred cycle would be checked one row at a time.
+                if deferring {
+                    transaction.batch_execute("SET CONSTRAINTS ALL DEFERRED")?;
+                }
+            }
+            Ok(())
+        });
+        match inserted {
             Ok(()) => {
                 let _ = transaction.batch_execute("RELEASE SAVEPOINT pgseed_probe");
                 outcome.kept += 1;
@@ -213,7 +241,7 @@ pub fn run(
     if keep {
         transaction
             .commit()
-            .map_err(|e| format!("could not commit: {e}"))?;
+            .map_err(|e| format!("could not commit: {}", crate::dberror::explain(&e)))?;
     }
     Ok(outcome)
 }

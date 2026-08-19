@@ -10,6 +10,7 @@
 
 pub mod checks;
 pub mod classify;
+pub mod dberror;
 pub mod dsn;
 pub mod emit;
 pub mod filter;
