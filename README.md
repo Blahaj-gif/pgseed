@@ -15,28 +15,37 @@ none of it.
 
 No codegen step. No generated client. No API key. No runtime — one binary.
 
-### Options
+## Install
 
-| | |
-|---|---|
-| `--dsn` / `$DATABASE_URL` | where the schema is read from |
-| `--schema NAME` | schemas to read, repeatable; default `public` |
-| `--rows N` | rows per table; default 50 |
-| `--rows TABLE=N` | override one, repeatable. Takes `*` and `?`; last match wins |
-| `--include` / `--exclude` | which tables to touch. `--exclude` wins on a conflict |
-| `--seed S` | same seed and schema give byte-identical SQL |
-| `--out FILE` | write the SQL here instead of stdout |
-| `--apply` | write the rows, in one transaction |
-| `--truncate` | empty the targets first, in dependency order. Never CASCADE |
-| `--allow-nonempty` | write even though the targets already hold rows |
-| `--probe` | offer the refused tables to the database and keep the rows it accepts |
-| `--remote` | write to a database that is not on this machine |
+```
+cargo install pgsow
+```
 
-The last two are the only guards, and both are questions rather than guesses.
-Reading a database name for the word `prod` stops nobody who called theirs
-`main` and annoys everybody whose local copy is called `myapp_production_dump`.
-So instead: **is the host this machine**, and **do the target tables already
-hold rows** — two facts a person can answer instantly and a tool cannot.
+Or take a binary from the releases page. It needs nothing else: no Docker, no
+Node, no daemon, no account.
+
+## What makes it different
+
+Every seed tool produces rows. This one tells you when it cannot.
+
+**Never emit a row that cannot be shown to satisfy every constraint that was
+read.** A table carrying a rule this cannot prove it satisfies is named, the
+constraint is quoted, and it is left alone — because the failure mode of a seed
+tool is not that it crashes, it is that it inserts plausible rows which quietly
+violate a rule nobody re-checked, and everything downstream is then tested
+against data the real system would have rejected.
+
+Three outcomes, never two: **filled · refused · could-not-read.**
+
+That claim is checked rather than argued. Across twenty schemas taken from real
+open-source projects — 2,353 tables, 1,921 statements — **Postgres accepts every
+row and rejects none.** The gate is zero, not a percentage.
+
+```sql
+INSERT INTO "public"."users" ("email", "username", "first_name", "last_name", "timezone") VALUES
+  ('ada.achebe@example.com',    'ada.achebe',    'Ada',   'Achebe',  'Europe/Berlin'),
+  ('amara.adeyemi@example.org', 'amara.adeyemi', 'Amara', 'Adeyemi', 'America/Chicago');
+```
 
 ## Reach, on twenty schemas nobody here wrote
 
@@ -180,16 +189,9 @@ pgsow: 14 tables, 12 fillable, 2 refused (86% reach)
                  or one of its columns nullable, would be enough.
 ```
 
-## The rule
+## How the rule is kept
 
-**Never emit a row that cannot be shown to satisfy every constraint that was
-read.**
-
-The failure mode of a seed tool is not that it crashes. It is that it inserts
-plausible rows which quietly violate a rule nobody re-checked, and everything
-downstream is then tested against data the real system would have rejected.
-
-So a CHECK constraint is **never evaluated**. There is no expression parser,
+A CHECK constraint is **never evaluated**. There is no expression parser,
 no simplification and no reasoning about operators. A partial solver that
 silently handles `total > 0` but mishandles `total > 0 OR status = 'void'` is
 worse than no solver at all, because the cases it gets wrong look exactly like
@@ -282,6 +284,30 @@ tight-fitting generator, not `ada.love`.
 What this does *not* do is make a row coherent beyond that: a `city` and a
 `country` in one row are drawn independently and may not belong together. The
 person columns are the exception, and they are the exception on purpose.
+
+## Options
+
+| | |
+|---|---|
+| `--dsn` / `$DATABASE_URL` | where the schema is read from |
+| `--schema NAME` | schemas to read, repeatable; default `public` |
+| `--rows N` | rows per table; default 50 |
+| `--rows TABLE=N` | override one, repeatable. Takes `*` and `?`; last match wins |
+| `--include` / `--exclude` | which tables to touch. `--exclude` wins on a conflict |
+| `--seed S` | same seed and schema give byte-identical SQL |
+| `--out FILE` | write the SQL here instead of stdout |
+| `--apply` | write the rows, in one transaction |
+| `--truncate` | empty the targets first, in dependency order. Never CASCADE |
+| `--allow-nonempty` | write even though the targets already hold rows |
+| `--probe` | offer the refused tables to the database and keep the rows it accepts |
+| `--remote` | write to a database that is not on this machine |
+
+`--allow-nonempty` and `--remote` are the only guards, and both are questions
+rather than guesses.
+Reading a database name for the word `prod` stops nobody who called theirs
+`main` and annoys everybody whose local copy is called `myapp_production_dump`.
+So instead: **is the host this machine**, and **do the target tables already
+hold rows** — two facts a person can answer instantly and a tool cannot.
 
 ## What it handles today
 
