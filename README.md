@@ -296,6 +296,12 @@ What this does *not* do is make a row coherent beyond that: a `city` and a
 `country` in one row are drawn independently and may not belong together. The
 person columns are the exception, and they are the exception on purpose.
 
+Across tables, identity follows the row index, which is the same as the parent
+row a foreign key points at **until the child is asked for more rows than its
+parent has**. Fill 3 users and 7 `user_emails` and the last four addresses
+belong to people who were never written. Measured, and being fixed — see
+`docs/plan-gaps.md`.
+
 ## Options
 
 | | |
