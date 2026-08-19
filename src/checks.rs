@@ -345,12 +345,12 @@ fn exactly_one_longhand(expression: &str) -> Option<Vec<String>> {
 
         for term in split_keyword(unwrap_parens(branch.trim()), " AND ") {
             let text = unwrap_parens(term.trim()).trim();
-            let (column, holds_a_value) = if let Some(rest) = text.strip_suffix("IS NOT NULL") {
-                (column_cast(rest.trim())?, true)
-            } else if let Some(rest) = text.strip_suffix("IS NULL") {
-                (column_cast(rest.trim())?, false)
-            } else {
-                return None;
+            let (column, holds_a_value) = match text.strip_suffix("IS NOT NULL") {
+                Some(rest) => (column_cast(rest.trim())?, true),
+                None => {
+                    let rest = text.strip_suffix("IS NULL")?;
+                    (column_cast(rest.trim())?, false)
+                }
             };
             // A column named twice in one branch is saying two things about
             // itself and this is not going to work out which.
