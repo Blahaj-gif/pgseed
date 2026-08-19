@@ -47,6 +47,30 @@ Nothing else is needed: no Docker, no Node, no daemon, no account.
 
 ## Getting started
 
+**Guard a schema in CI.** `--plan` writes nothing and exits 1 if any table was
+refused, so a migration that adds a constraint nothing can satisfy turns the
+build red before it reaches anyone's dev database. This is the one that runs
+without being remembered:
+
+```yaml
+- run: pgseed --dsn "$DATABASE_URL" --plan
+  env:
+    DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+```
+
+Pair it with a `postgres` service container and your migration step. Nothing to
+install beyond the binary, and no state left behind — `--plan` only reads.
+
+**Make a seed file to commit.** The same seed and schema give byte-identical
+SQL, so a committed file is a golden fixture: every branch and every test run
+starts from exactly the same rows, and a change to the data shows up as a diff
+somebody can read.
+
+```
+pgseed --dsn "$DATABASE_URL" --rows 200 > seed.sql
+psql "$DATABASE_URL" -f seed.sql
+```
+
 **Fill a development database.** Wipes the target tables first, then writes 50
 rows each, inside one transaction:
 
@@ -54,29 +78,12 @@ rows each, inside one transaction:
 pgseed --dsn "$DATABASE_URL" --apply --truncate
 ```
 
-**Make a seed file to commit.** SQL goes to stdout, the report to stderr, so
-the file contains only SQL:
-
-```
-pgseed --dsn "$DATABASE_URL" --rows 200 > seed.sql
-psql "$DATABASE_URL" -f seed.sql
-```
-
-The same seed always produces the same bytes, so this diffs cleanly.
-
 **Fill more of the database.** With `--probe`, every table pgseed refused is
 offered to the database behind a savepoint and kept if it is accepted. Reach
 goes from 67% to 88% on real schemas:
 
 ```
 pgseed --dsn "$DATABASE_URL" --apply --truncate --probe
-```
-
-**Check a schema in CI.** `--plan` writes nothing and exits 1 if anything was
-refused, so a new constraint nobody can satisfy fails the build:
-
-```
-pgseed --dsn "$DATABASE_URL" --plan || echo "something is unfillable"
 ```
 
 **Point it at part of a schema.** Patterns take `*` and `?`, and `--exclude`
@@ -151,8 +158,21 @@ gate is zero, not a percentage, because the database is the judge.
 |---|---:|---:|
 | of every table in the corpus | 66.6% | **88.1%** |
 | of the tables that can hold a row | 69.3% | **91.6%** |
+| averaged per schema, unweighted | 82.8% | **94.3%** |
 
-Both are shown because they answer different questions. The second excludes
+Three numbers because they answer three questions, and the gap between the
+first and the last is worth being blunt about: **GitLab is 1,057 tables, 41% of
+the entire corpus, and scores 40%.** The corpus-wide figure is therefore
+substantially a report on how this handles GitLab. Without it the same corpus
+reads 84.9% and 95.8%.
+
+Neither framing is the honest one on its own. Counting tables is the harder
+test and the one that judges the tool, so it stays the headline. The per-schema
+average is closer to what a reader's own schema will do, since most schemas are
+not GitLab — 21 of the 24 are at 88% or better with `--probe`. The spread
+between them is a fact about the corpus, not a choice about presentation.
+
+The second row excludes
 **100 tables that can hold no row from anybody**: 83 partitioned tables whose
 dumps declare the parent and create the partitions at runtime, and 17 more
 downstream of one.
@@ -237,6 +257,13 @@ everybody else's `two_factor_secret`.
   and `email` are three readings of one number, so they agree by construction.
 - **Rows in a child table describe the parent they point at.** Fill 3 users and
   7 notes and every note names the user it references.
+- **Timestamps run forwards.** `created_at` lands at or before `updated_at`,
+  both before `deleted_at` or `expires_at`, and a child row is not created
+  before the row it points at. Where the column has a database default — most
+  Prisma and Ecto schemas — the database fills it and none of this applies.
+  Postgres accepts any ordering, so nothing was ever rejected for this: the
+  rows were valid and the application logic on top of them was not, which is
+  the failure this opens by describing.
 - **Nothing generated can reach anybody.** Addresses use the RFC 2606 reserved
   domains, phone numbers the 555-01xx block, and IPs the RFC 5737 documentation
   ranges — or `10.0.0.0/8` for an `inet` or `cidr` column, which needs more

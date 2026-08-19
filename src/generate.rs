@@ -389,10 +389,26 @@ pub fn value_as(
     // What the column is called, where that says something exact. Worked out
     // once here rather than inside `render`, which recurses through domains
     // and arrays and would otherwise re-derive it at every level.
-    let noun = nouns::of_in(&table.name, &column.name);
-    // And, for a number, whatever its name says about the size of it.
-    let range = nouns::numeric_range(&column.name);
-    render(&mut rng, &column.type_, identity, step, bounds, noun, range)
+    let named = Named {
+        noun: nouns::of_in(&table.name, &column.name),
+        // And, for a number, whatever its name says about the size of it.
+        range: nouns::numeric_range(&column.name),
+        moment: nouns::moment_of(&column.name),
+    };
+    render(&mut rng, &column.type_, identity, step, bounds, &named)
+}
+
+/// Everything the column's *name* implies, worked out once at the call site.
+///
+/// `render` recurses through domains and arrays, and re-deriving these at every
+/// level would read the same name three times to get the same answer. Grouped
+/// rather than passed loose because they are one idea — what this column is
+/// called — and because eight arguments is too many, which clippy says out loud.
+#[derive(Clone, Copy)]
+struct Named {
+    noun: Option<Noun>,
+    range: Option<(i64, i64)>,
+    moment: Option<nouns::Moment>,
 }
 
 fn render(
@@ -405,9 +421,13 @@ fn render(
     identity: usize,
     step: Option<usize>,
     bounds: &Bounds,
-    noun: Option<Noun>,
-    range: Option<(i64, i64)>,
+    named: &Named,
 ) -> Literal {
+    let Named {
+        noun,
+        range,
+        moment,
+    } = *named;
     let unique = step.is_some();
     let step = step.unwrap_or(identity);
     match type_ {
@@ -626,9 +646,18 @@ fn render(
             ))
         }
 
+        // Anchored on the row's identity when the column name says where in
+        // the row's life it sits, so `created_at` lands at or before
+        // `updated_at` and a child is not created before its parent. Postgres
+        // accepts either ordering, which is exactly why nothing caught this:
+        // the rows were valid and the application logic on top of them was
+        // not. A unique column still walks its step, because distinctness
+        // beats coherence wherever the two disagree.
         ColumnType::Timestamp { with_zone } => {
             let seconds = if unique {
                 step
+            } else if let Some(moment) = moment {
+                nouns::moment_seconds(moment, identity, rng)
             } else {
                 rng.gen_range(0..315_360_000)
             };
@@ -768,15 +797,9 @@ fn render(
             }
         }
 
-        ColumnType::Domain { inner, .. } => render(
-            rng,
-            inner,
-            identity,
-            step_of(unique, step),
-            bounds,
-            noun,
-            range,
-        ),
+        ColumnType::Domain { inner, .. } => {
+            render(rng, inner, identity, step_of(unique, step), bounds, named)
+        }
 
         // One element is enough to be a valid array, and a longer one only
         // makes a failure harder to read.
@@ -787,15 +810,7 @@ fn render(
             // nine real schemas. Where the element type has no unambiguous
             // name to write, the array goes out uncast as before rather than
             // naming a type that might belong to another schema.
-            let Literal(inner) = render(
-                rng,
-                of,
-                identity,
-                step_of(unique, step),
-                bounds,
-                noun,
-                range,
-            );
+            let Literal(inner) = render(rng, of, identity, step_of(unique, step), bounds, named);
             match of.sql_name() {
                 Some(name) => Literal(format!("ARRAY[{inner}]::{name}[]")),
                 None => Literal(format!("ARRAY[{inner}]")),
@@ -1103,5 +1118,102 @@ mod tests {
         };
         // Both constraints hold, so the tighter one governs.
         assert_eq!(bounds_for(&table)["name"].max_length, Some(10));
+    }
+}
+
+#[cfg(test)]
+mod moments {
+    use super::*;
+
+    fn stamp(table: &str, column: &str, identity: usize) -> String {
+        let c = column_named(column, ColumnType::Timestamp { with_zone: false });
+        value(
+            1,
+            &TableId::new("public", table),
+            &c,
+            identity,
+            &Bounds::default(),
+            None,
+        )
+        .0
+    }
+
+    fn column_named(name: &str, type_: ColumnType) -> Column {
+        Column {
+            name: name.into(),
+            type_,
+            nullable: true,
+            has_default: false,
+            default_is_sequence: false,
+            is_generated: false,
+            position: 1,
+        }
+    }
+
+    fn table_id() -> TableId {
+        TableId::new("public", "t")
+    }
+
+    /// The ordering the whole band scheme exists to produce.
+    #[test]
+    fn a_row_is_created_before_it_is_updated_and_deleted() {
+        for row in 0..60 {
+            let created = stamp("orders", "created_at", row);
+            let updated = stamp("orders", "updated_at", row);
+            let deleted = stamp("orders", "deleted_at", row);
+            assert!(created <= updated, "row {row}: {created} > {updated}");
+            assert!(updated < deleted, "row {row}: {updated} >= {deleted}");
+        }
+    }
+
+    /// Prisma's spelling reaches the same band, via the same hump split the
+    /// ordinary nouns use.
+    #[test]
+    fn camel_case_timestamps_land_in_the_same_band() {
+        assert_eq!(
+            nouns::moment_of("createdAt"),
+            nouns::moment_of("created_at")
+        );
+        assert_eq!(
+            nouns::moment_of("updatedAt"),
+            nouns::moment_of("updated_at")
+        );
+        assert_eq!(
+            nouns::moment_of("expiresAt"),
+            nouns::moment_of("expires_at")
+        );
+        assert_eq!(
+            nouns::moment_of("created_on"),
+            nouns::moment_of("created_at")
+        );
+    }
+
+    /// A child borrows its parent's identity, so it is anchored to its
+    /// parent's day and cannot be created before it.
+    #[test]
+    fn a_child_is_not_created_before_the_parent_it_points_at() {
+        for parent in 0..40 {
+            let theirs = stamp("users", "created_at", parent);
+            let mine = stamp("notes", "created_at", parent);
+            assert!(mine >= theirs, "note {parent}: {mine} < {theirs}");
+        }
+    }
+
+    /// Distinctness still wins where the two disagree.
+    #[test]
+    fn a_unique_timestamp_column_is_still_distinct() {
+        let c = column_named("created_at", ColumnType::Timestamp { with_zone: true });
+        let mut seen = std::collections::BTreeSet::new();
+        for row in 0..2_000 {
+            let v = value(1, &table_id(), &c, row, &Bounds::default(), Some(1));
+            assert!(seen.insert(v.0.clone()), "{:?} appeared twice", v);
+        }
+    }
+
+    /// A name outside the closed set keeps the behaviour it had.
+    #[test]
+    fn an_unnamed_timestamp_is_left_alone() {
+        assert_eq!(nouns::moment_of("some_column"), None);
+        assert_eq!(nouns::moment_of("scheduled_for"), None);
     }
 }

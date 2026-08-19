@@ -1639,3 +1639,77 @@ mod camel {
         assert!(of("emailVerified").is_none() || of("emailVerified") == of("email_verified"));
     }
 }
+
+/// Where a timestamp column sits in the life of its row.
+///
+/// Three bands rather than a set of names with rules between them, because
+/// ordering then falls out of arithmetic instead of having to be checked. A
+/// column in `Opened` is always at or before one in `Touched`, which is always
+/// before one in `Closed`, and no cell has to know what any other cell chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moment {
+    /// When the row began: `created_at`, `inserted_at`, `started_at`.
+    Opened,
+    /// When it was last handled: `updated_at`, `last_seen_at`, `verified_at`.
+    Touched,
+    /// When it stopped: `deleted_at`, `expires_at`, `ended_at`.
+    Closed,
+}
+
+/// Which band a timestamp column belongs to, when its name says so.
+///
+/// Matched the same way ordinary nouns are: the camel hump is split first, so
+/// Prisma's `createdAt` reaches the same band as everybody else's
+/// `created_at`, and a trailing `_at` / `_on` / `_date` / `_time` is stripped
+/// so `created_on` and `created` land together. Anything outside the set
+/// returns `None` and keeps the old unanchored behaviour.
+pub fn moment_of(column: &str) -> Option<Moment> {
+    let name = split_camel(column).trim_matches('_').to_ascii_lowercase();
+    let stem = [" _at", "_on", "_date", "_time", "_timestamp", "_ts"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix.trim()))
+        .unwrap_or(&name);
+    Some(match stem {
+        "created" | "inserted" | "added" | "registered" | "joined" | "started" | "began"
+        | "opened" | "published" | "sent" | "issued" | "requested" | "submitted" | "first_seen"
+        | "birth" | "born" => Moment::Opened,
+        "updated" | "modified" | "changed" | "edited" | "touched" | "refreshed" | "synced"
+        | "processed" | "confirmed" | "verified" | "approved" | "accepted" | "read"
+        | "delivered" | "seen" | "last_seen" | "last_used" | "last_login" | "last_active"
+        | "locked" | "claimed" | "heartbeat" => Moment::Touched,
+        "deleted" | "removed" | "destroyed" | "discarded" | "archived" | "expires" | "expired"
+        | "expiry" | "ended" | "finished" | "completed" | "closed" | "cancelled" | "canceled"
+        | "revoked" | "rejected" | "failed" | "purged" | "retired" => Moment::Closed,
+        _ => return None,
+    })
+}
+
+/// The instant a timestamp column should carry, in seconds from the corpus
+/// epoch.
+///
+/// Anchored on the row's **identity**, not its index. That is the same number
+/// the person-shaped nouns read, so a child row that borrows its parent's
+/// identity is anchored to its parent's day — which is how `created_at` on a
+/// child ends up at or after `created_at` on the row it points at, without
+/// either cell being able to see the other.
+///
+/// `Opened` takes the anchor exactly and the later bands add to it. Giving
+/// `Opened` a jitter of its own would make a child occasionally land a few
+/// hours before its parent, which is the one ordering this exists to prevent,
+/// so it does not get one.
+pub fn moment_seconds(moment: Moment, identity: usize, rng: &mut ChaCha8Rng) -> usize {
+    const DAY: usize = 86_400;
+    const BAND: usize = 30 * DAY;
+    // A day per identity across the same ten years the unanchored generator
+    // used, so rows still spread out and later rows are later.
+    // A time of day as well as a date, derived from the identity rather than
+    // drawn, so every `created_at` is not exactly midnight. Deterministic is
+    // the point: the same identity has to give the same instant, or a child
+    // and the parent it borrows from would stop agreeing.
+    let anchor = (identity % 3_650) * DAY + (identity.wrapping_mul(37_813)) % DAY;
+    match moment {
+        Moment::Opened => anchor,
+        Moment::Touched => anchor + BAND + rng.gen_range(0..BAND),
+        Moment::Closed => anchor + 3 * BAND + rng.gen_range(0..BAND),
+    }
+}

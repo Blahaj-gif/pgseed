@@ -193,8 +193,17 @@ percentage, because the database is the judge.
 | of every table, with `--probe` | 87.7% | **88.1%** |
 | of tables that can hold a row, by reasoning | 67.7% | **69.3%** |
 | of tables that can hold a row, with `--probe` | 91.6% | **91.6%** |
+| averaged per schema, by reasoning | — | **82.8%** |
+| averaged per schema, with `--probe` | — | **94.3%** |
 | tables | 2,354 | **2,586** |
 | text columns landing on a noun | 77% | **79%** |
+
+The per-schema average is there because the corpus-wide figure is dominated by
+one schema: **GitLab is 1,057 tables, 41% of the corpus, and scores 40%.**
+Without it the same corpus reads 84.9% and 95.8%. Counting tables is the harder
+test and stays the headline; the average is closer to what one ordinary schema
+will do, and 21 of the 24 are at 88% or better with `--probe`. Publishing only
+one of the two would be a choice about presentation rather than a measurement.
 
 New schemas, by reasoning and with `--probe`: Documenso **100% / 100%**,
 Camunda **98% / 100%**, Langfuse **91% / 100%**, Zitadel **17% / 37%**.
@@ -300,6 +309,38 @@ the library, which is why the corpus had never seen them:
   `hdb_catalog` and Zitadel in `zitadel`; with the default `--schema public`
   both reported "0 tables" and exited 0, which reads as an empty database. It
   now names the schemas that do hold tables.
+
+## A proposed roadmap, checked against the corpus and declined
+
+An outside review proposed five CHECK shapes as the highest-value contributor
+path: a range with both bounds, an `IN` list, date ordering, a `LIKE` pattern,
+and a conditional NOT NULL. It is a plausible list. Measured against the 2,555
+CHECK constraints in this corpus, four of the five are already handled or do
+not occur:
+
+| proposed | what the corpus says |
+|---|---|
+| `x >= 0 AND x <= 100` | already handled — `LowerBound` + `UpperBound`, and `interpret_all` splits top-level `AND` |
+| `status IN ('a','b')` | already handled as `ValueSet` — **0** of the 603 unrecognised checks contain `IN (` |
+| `email LIKE '%@%'` | **0** unrecognised checks contain `LIKE` |
+| `CASE WHEN type = 'x' THEN ...` | **0** unrecognised checks contain `CASE WHEN` |
+| `start_date < end_date` | **at most 1** instance in 2,555 checks, not "extremely common" |
+
+And the premise under the list does not hold either: of the 603 not
+understood, **313 are triggers rather than CHECK constraints at all**, 67 are
+index expressions and 5 are exclusion constraints. No amount of expression work
+touches those.
+
+Recorded here rather than argued each time it comes up, because the same list
+is a reasonable thing to guess and the counts are the answer. The real ranking
+is in `CONTRIBUTING.md`, and the largest genuine CHECK gap is the tagged union
+above — 48 constraints, worth about six tables.
+
+The point is not that the review was careless. It is that the corpus is public,
+pinned and reproducible precisely so that a question like *which shapes are
+missing* has an answer that nobody has to estimate.
+
+---
 
 ## Left undone, deliberately
 
