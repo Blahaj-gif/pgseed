@@ -487,3 +487,28 @@ fn probing_writes_the_understood_rows_exactly_as_a_plain_apply_would() {
     }
     assert!(probed.len() > plain.len(), "probing should add rows");
 }
+
+#[test]
+fn a_single_row_lock_table_holds_exactly_one_row() {
+    // Synapse's idiom, and the shape that caught the closed set out. A column
+    // constrained to one value and made unique can hold exactly one row, so
+    // understanding the constraint is only half the job — the row count has to
+    // follow from it, or the tool asks for five rows and the database refuses
+    // the second.
+    let db = Db::start();
+    db.apply(
+        "CREATE TABLE stream_position (
+             lock            character(1) DEFAULT 'X'::bpchar NOT NULL,
+             stream_ordering bigint,
+             CONSTRAINT stream_position_lock_check CHECK ((lock = 'X'::bpchar))
+         );
+         ALTER TABLE ONLY stream_position
+             ADD CONSTRAINT stream_position_lock_key UNIQUE (lock);",
+    );
+    let (_, verdict, sql) = plan(&db, 5);
+    assert!(fillable(&verdict, "stream_position"));
+    db.client()
+        .batch_execute(&sql)
+        .expect("Postgres accepts it");
+    assert_eq!(count(&db, "stream_position"), 1);
+}

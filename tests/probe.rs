@@ -99,7 +99,7 @@ fn how_far_the_database_gets_us() {
             }
             let mut ranked: Vec<_> = counted.into_iter().map(|(k, v)| (v, k)).collect();
             ranked.sort_by(|a, b| b.0.cmp(&a.0));
-            for (n, what) in ranked.iter().take(20) {
+            for (n, what) in ranked.iter().take(2000) {
                 println!(
                     "      {n:>3}  {}",
                     what.chars().take(110).collect::<String>()

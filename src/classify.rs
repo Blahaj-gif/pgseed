@@ -136,79 +136,103 @@ fn direct_refusals(table: &Table, order: &Order) -> Vec<Refusal> {
     // refused, unexamined and unapproximated. See `checks`.
     for check in &table.checks {
         use crate::checks::Meaning;
-        let satisfiable = match crate::checks::interpret(&check.definition) {
-            // Already true by construction, or a limit the generator honours.
-            Meaning::LengthLimit { column, .. }
-            | Meaning::NotNull { column }
-            | Meaning::ByteLength { column, .. }
-            | Meaning::LowerBound { column, .. }
-            | Meaning::Lowercase { column } => table.column(&column).is_some(),
-            // An obligation rather than a permission: satisfied by writing
-            // NULL, and therefore only satisfiable if the column may BE null.
-            // A NOT NULL column carrying `(col IS NULL) OR ...` genuinely
-            // cannot take this way out, and accepting it would produce rows
-            // that violate the constraint the moment they are written.
-            Meaning::MustBeNull { column } => table.column(&column).is_some_and(|c| c.nullable),
-            // A byte ceiling is a length limit the generator honours; an array
-            // limit of one or more is already met, because every array this
-            // writes holds one element.
-            Meaning::ByteLimit { column, .. } => table.column(&column).is_some(),
-            // Every value this generates is at least one character long, so a
-            // column that must not be empty already is not.
-            Meaning::NonEmpty { column } => table.column(&column).is_some(),
-            // A floor on the length is met by padding, but only where there
-            // is room to pad into. A column declared `varchar(8)` and obliged
-            // to hold twelve characters has no satisfying row, and reading
-            // both rules and then writing eight characters anyway is exactly
-            // the silent-pass this project exists to not do.
-            Meaning::MinLength { column, min } => table
-                .column(&column)
-                .is_some_and(|c| ceiling_for(table, c).map_or(true, |max| max >= min)),
-            // One of a listed set of values, which is an enum written out
-            // longhand and satisfied the same way.
-            Meaning::ValueSet { column, values } => {
-                !values.is_empty() && table.column(&column).is_some()
-            }
-            // At least one of them holds a value, and all of them are filled
-            // unless a foreign key had nowhere to point. One that certainly
-            // gets a value is enough, and `filled_column` finds it.
-            Meaning::AtLeastOneNonNull { columns } => {
-                // At least one of them has to end up holding a value, so at
-                // least one must not be under an obligation to be null. Every
-                // one of GitLab's `ai_tool_rules` permission columns is, from
-                // a separate `(col IS NULL) OR ...` on each, and the two
-                // rules together have no satisfying row.
-                columns.iter().any(|c| !table.check_forces_null(c))
-                    && crate::generate::filled_column(table, &columns).is_some()
-            }
-            Meaning::CardinalityLimit { column, max } => {
-                max >= 1 && table.column(&column).is_some()
-            }
-            // Only for a column that actually holds JSON. `jsonb_typeof` of
-            // anything else is a question this cannot answer by generating.
-            Meaning::JsonType { column, .. } => table
-                .column(&column)
-                .is_some_and(|c| matches!(c.type_, crate::schema::ColumnType::Json { .. })),
-            // Exactly one of these columns holds a value. Satisfiable when a
-            // column can be chosen to hold it and every other one may be null
-            // — two columns the catalogue insists on cannot have exactly one
-            // between them, and `filled_column` returns nothing to say so.
-            Meaning::ExactlyOneNonNull { columns } => {
-                let chosen = crate::generate::filled_column(table, &columns);
-                chosen.is_some_and(|keep| {
-                    // The one that holds the value must not be under an
-                    // obligation elsewhere to be null, and every other one
-                    // must be allowed to be.
-                    !table.check_forces_null(&keep)
-                        && columns.iter().all(|c| {
-                            table
-                                .column(c)
-                                .is_some_and(|col| *c == keep || col.nullable)
-                        })
-                })
-            }
-            Meaning::Unknown => false,
-        };
+        let satisfiable = crate::checks::interpret_all(&check.definition)
+            .into_iter()
+            .all(|meaning| match meaning {
+                // Already true by construction, or a limit the generator honours.
+                Meaning::LengthLimit { column, .. }
+                | Meaning::NotNull { column }
+                | Meaning::ByteLength { column, .. }
+                | Meaning::LowerBound { column, .. }
+                | Meaning::Lowercase { column } => table.column(&column).is_some(),
+                // An obligation rather than a permission: satisfied by writing
+                // NULL, and therefore only satisfiable if the column may BE null.
+                // A NOT NULL column carrying `(col IS NULL) OR ...` genuinely
+                // cannot take this way out, and accepting it would produce rows
+                // that violate the constraint the moment they are written.
+                Meaning::MustBeNull { column } => table.column(&column).is_some_and(|c| c.nullable),
+                // A byte ceiling is a length limit the generator honours; an array
+                // limit of one or more is already met, because every array this
+                // writes holds one element.
+                Meaning::ByteLimit { column, .. } => table.column(&column).is_some(),
+                // Every value this generates is at least one character long, so a
+                // column that must not be empty already is not.
+                Meaning::NonEmpty { column } => table.column(&column).is_some(),
+                // A floor on the length is met by padding, but only where there
+                // is room to pad into. A column declared `varchar(8)` and obliged
+                // to hold twelve characters has no satisfying row, and reading
+                // both rules and then writing eight characters anyway is exactly
+                // the silent-pass this project exists to not do.
+                Meaning::MinLength { column, min } => table
+                    .column(&column)
+                    .is_some_and(|c| ceiling_for(table, c).map_or(true, |max| max >= min)),
+                // One of a listed set of values, which is an enum written out
+                // longhand and satisfied the same way.
+                Meaning::ValueSet { column, values } => {
+                    !values.is_empty() && table.column(&column).is_some()
+                }
+                // At least one of them holds a value, and all of them are filled
+                // unless a foreign key had nowhere to point. One that certainly
+                // gets a value is enough, and `filled_column` finds it.
+                Meaning::AtLeastOneNonNull { columns } => {
+                    // At least one of them has to end up holding a value, so at
+                    // least one must not be under an obligation to be null. Every
+                    // one of GitLab's `ai_tool_rules` permission columns is, from
+                    // a separate `(col IS NULL) OR ...` on each, and the two
+                    // rules together have no satisfying row.
+                    // `filled_column` is not the right question here: it
+                    // answers "which single one holds the value", which is
+                    // exactly-one's question, and it gives up when two of them
+                    // are NOT NULL — a case that makes at-least-one *certain*
+                    // rather than impossible. Synapse and GitLab both write
+                    // `num_nonnulls(a, b) = 2` over two NOT NULL columns and
+                    // were refused for it.
+                    //
+                    // A foreign key column is less sure: its parent may have
+                    // been refused, leaving it NULL without refusing this
+                    // table, since a nullable key spreads no contagion. So a
+                    // plain column is looked for first, and only when every
+                    // candidate is a foreign key does this fall back to the
+                    // stricter question.
+                    let certain = |c: &String| {
+                        table.column(c).is_some()
+                            && !table.check_forces_null(c)
+                            && !table.foreign_keys.iter().any(|fk| fk.columns.contains(c))
+                    };
+                    columns.iter().any(certain)
+                        || (columns.iter().any(|c| !table.check_forces_null(c))
+                            && crate::generate::filled_column(table, &columns).is_some())
+                }
+                Meaning::CardinalityLimit { column, max } => {
+                    max >= 1 && table.column(&column).is_some()
+                }
+                // Only for a column that actually holds JSON. `jsonb_typeof` of
+                // anything else is a question this cannot answer by generating.
+                Meaning::JsonType { column, .. } => table
+                    .column(&column)
+                    .is_some_and(|c| matches!(c.type_, crate::schema::ColumnType::Json { .. })),
+                // Exactly one of these columns holds a value. Satisfiable when a
+                // column can be chosen to hold it and every other one may be null
+                // — two columns the catalogue insists on cannot have exactly one
+                // between them, and `filled_column` returns nothing to say so.
+                Meaning::ExactlyOneNonNull { columns } => {
+                    let chosen = crate::generate::filled_column(table, &columns);
+                    chosen.is_some_and(|keep| {
+                        // The one that holds the value must not be under an
+                        // obligation elsewhere to be null, and every other one
+                        // must be allowed to be.
+                        !table.check_forces_null(&keep)
+                            && columns.iter().all(|c| {
+                                table
+                                    .column(c)
+                                    .is_some_and(|col| *c == keep || col.nullable)
+                            })
+                    })
+                }
+                // A ceiling on a number is honoured by generating under it.
+                Meaning::UpperBound { column, .. } => table.column(&column).is_some(),
+                Meaning::Unknown => false,
+            });
         if !satisfiable {
             out.push(Refusal::CheckConstraint {
                 name: check.name.clone(),

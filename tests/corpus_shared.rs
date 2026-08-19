@@ -180,12 +180,43 @@ fn next_semicolon(text: &str, quoted: &mut bool) -> Option<usize> {
 /// measuring the harness. A real connection has `"$user", public`, so the
 /// search path is put back to something real before anything is asked of the
 /// database.
+/// Whether a statement is the kind that shapes a schema.
+///
+/// The corpus gate has always filtered to this, and the other harnesses did
+/// not — so they were loading the seed rows a production dump carries, and
+/// measuring a different database. Synapse ships
+/// `INSERT INTO appservice_stream_position VALUES ('X', 0)`, whose table can
+/// hold exactly one row; with that row already there, a tool asking for one
+/// more is correct and the insert still fails. Two harnesses that disagree
+/// about what is in the database produce two numbers nobody can compare, which
+/// is how a two-table discrepancy went into a README.
+pub fn shapes_the_schema(statement: &str) -> bool {
+    let head = statement.trim_start().to_uppercase();
+    [
+        "CREATE TABLE",
+        "ALTER TABLE",
+        "CREATE TYPE",
+        "CREATE DOMAIN",
+        "CREATE SEQUENCE",
+        "CREATE FUNCTION",
+        "CREATE OR REPLACE FUNCTION",
+        "CREATE EXTENSION",
+        "CREATE SCHEMA",
+        "CREATE INDEX",
+        "CREATE UNIQUE INDEX",
+        "CREATE TRIGGER",
+        "CREATE OR REPLACE TRIGGER",
+    ]
+    .iter()
+    .any(|allowed| head.starts_with(allowed))
+}
+
 pub fn load(client: &mut postgres::Client, sql: &str) -> Vec<String> {
     let schemas = schemas_in(sql);
     for name in &schemas {
         let _ = client.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{name}\";"));
     }
-    for statement in statements(sql) {
+    for statement in statements(sql).into_iter().filter(|s| shapes_the_schema(s)) {
         let _ = client.batch_execute(&statement);
     }
 

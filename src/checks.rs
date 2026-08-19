@@ -79,6 +79,15 @@ pub enum Meaning {
     /// `cardinality(col) <= N`. Every array this generates holds one element,
     /// so any limit of 1 or more is already met.
     CardinalityLimit { column: String, max: i32 },
+    /// `col <= N` or `col < N` against a plain literal. A ceiling on a
+    /// generated number, and the mirror of `LowerBound` — which existed on its
+    /// own for a while, so `(rollout >= 0) AND (rollout <= 10000)` was half
+    /// understood and therefore refused.
+    UpperBound {
+        column: String,
+        max: i64,
+        inclusive: bool,
+    },
     /// `char_length(col) >= N`, or `> N`, or the same with `length`. A floor
     /// rather than a ceiling, and satisfied by padding a value that falls
     /// short. Eight of these across the corpus, which is few, but a schema
@@ -202,6 +211,35 @@ fn column_cast(text: &str) -> Option<String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ');
     is_type_name.then(|| column_name(left.trim())).flatten()
+}
+
+/// Whether a fragment is a constant this can write back out verbatim.
+///
+/// Deliberately narrow: a quoted string, an integer, or a boolean, each with
+/// an optional cast. A function call is not one, and neither is a column, so
+/// `col = lower(col)` and `col = date_trunc(...)` fall past this to the rules
+/// that know what they mean.
+fn is_a_literal(text: &str) -> bool {
+    let text = unwrap_parens(text.trim()).trim();
+    let text = match text.split_once("::") {
+        Some((left, right))
+            if !right.trim().is_empty()
+                && right
+                    .trim()
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ') =>
+        {
+            unwrap_parens(left.trim()).trim()
+        }
+        _ => text,
+    };
+    const QUOTE: char = '\u{27}';
+    if text.chars().count() >= 2 && text.starts_with(QUOTE) && text.ends_with(QUOTE) {
+        // No embedded quote: a doubled one means this is really an escape, and
+        // reproducing it is not worth guessing at.
+        return !text[1..text.len() - 1].contains(QUOTE);
+    }
+    matches!(text, "true" | "false") || text.parse::<i64>().is_ok()
 }
 
 /// An integer bound, written `255` or `(255)::integer`.
@@ -348,6 +386,53 @@ fn exactly_one_longhand(expression: &str) -> Option<Vec<String>> {
     Some(columns.into_iter().collect())
 }
 
+/// Everything a constraint requires, as separate obligations.
+///
+/// A CHECK is usually one rule and `interpret` reads it. Some are several
+/// joined by AND, and each half is a rule this already knows:
+///
+/// ```text
+///   (char_length(name) <= 32) AND (char_length(name) >= 3)
+///   (jsonb_typeof(min_cursor) = 'array') AND (jsonb_typeof(max_cursor) = 'array')
+/// ```
+///
+/// Both were refused, not because either half was hard but because nothing
+/// split them. Eighteen of the sixty-two constraints still refusing a table
+/// after the database itself had been asked were this shape.
+///
+/// A conjunction holds exactly when every part holds, so reading it as its
+/// parts is not an approximation. **Every part must be understood** — one
+/// `Unknown` makes the whole thing unknown, because satisfying the halves you
+/// recognise while ignoring the half you do not is precisely the silent pass
+/// this project exists to avoid. OR is not split, and must not be: a
+/// disjunction is satisfied by *either* side and choosing which is a decision
+/// this has no basis for.
+pub fn interpret_all(definition: &str) -> Vec<Meaning> {
+    let whole = interpret(definition);
+    if whole != Meaning::Unknown {
+        return vec![whole];
+    }
+
+    let body = definition.trim();
+    let Some(rest) = body.strip_prefix("CHECK") else {
+        return vec![Meaning::Unknown];
+    };
+    let rest = rest.trim().trim_end_matches("NOT VALID").trim();
+    let parts = split_keyword(unwrap_parens(rest), " AND ");
+    if parts.len() < 2 {
+        return vec![Meaning::Unknown];
+    }
+
+    let read: Vec<Meaning> = parts
+        .iter()
+        .map(|part| interpret(&format!("CHECK ({})", part.trim())))
+        .collect();
+    if read.contains(&Meaning::Unknown) {
+        return vec![Meaning::Unknown];
+    }
+    read
+}
+
 /// Read a constraint definition, and say what it means only when that is
 /// beyond doubt.
 ///
@@ -364,6 +449,23 @@ pub fn interpret(definition: &str) -> Meaning {
 
     if let Some(Some(column)) = expression.strip_suffix("IS NOT NULL").map(column_name) {
         return Meaning::NotNull { column };
+    }
+
+    // `col = 'X'` — one permitted value, which is a `ValueSet` with a single
+    // member and satisfied by writing it. `lock = 'X'::bpchar` is the
+    // single-row-table idiom and appears five times in the corpus.
+    if let Some((left, right)) = split_top(expression, "=") {
+        if !left.ends_with(['<', '>', '!']) && !right.starts_with('=') {
+            if let Some(column) = column_cast(left) {
+                let literal = right.trim();
+                if is_a_literal(literal) {
+                    return Meaning::ValueSet {
+                        column,
+                        values: vec![literal.to_string()],
+                    };
+                }
+            }
+        }
     }
 
     // Exactly one of them holds a value, written out longhand:
@@ -468,6 +570,16 @@ pub fn interpret(definition: &str) -> Meaning {
     // that is not a plain integer once the cast comes off is not a bound this
     // understands.
     if let Some((left, right)) = split_top(expression, "<=") {
+        // Written the other way round: `1 <= "position"` is a floor on the
+        // column, not a ceiling. GitLab writes bounded ranges this way and the
+        // early return below meant the whole conjunction went unread over it.
+        if let (Some(min), Some(column)) = (integer_bound(left), column_name(right.trim())) {
+            return Meaning::LowerBound {
+                column,
+                min,
+                inclusive: true,
+            };
+        }
         let Some(max) = integer_bound(right).and_then(|n| i32::try_from(n).ok()) else {
             return Meaning::Unknown;
         };
@@ -492,7 +604,53 @@ pub fn interpret(definition: &str) -> Meaning {
                 return Meaning::CardinalityLimit { column, max };
             }
         }
+        // A plain ceiling on the column itself, which is what is left once the
+        // measuring functions have had their turn.
+        if let Some(column) = column_name(left.trim()) {
+            if let Some(max) = integer_bound(right) {
+                return Meaning::UpperBound {
+                    column,
+                    max,
+                    inclusive: true,
+                };
+            }
+        }
         return Meaning::Unknown;
+    }
+
+    // `col < N`, and `char_length(col) < N` — a strict ceiling, which is the
+    // inclusive one at N - 1. `<=` is tried first above, so anything reaching
+    // here really is the one-character operator.
+    if let Some((left, right)) = split_top(expression, "<") {
+        if !right.starts_with('=') && !right.starts_with('>') {
+            // `0 < col` is a floor of one, the reversed twin of `col > 0`.
+            if let (Some(min), Some(column)) = (integer_bound(left), column_name(right.trim())) {
+                return Meaning::LowerBound {
+                    column,
+                    min: min + 1,
+                    inclusive: true,
+                };
+            }
+            if let Some(bound) = integer_bound(right) {
+                for call in ["char_length", "length"] {
+                    if let Some(column) = call_argument(left, call).and_then(column_cast) {
+                        if let Ok(max) = i32::try_from(bound - 1) {
+                            if max > 0 {
+                                return Meaning::LengthLimit { column, max };
+                            }
+                        }
+                        return Meaning::Unknown;
+                    }
+                }
+                if let Some(column) = column_name(left.trim()) {
+                    return Meaning::UpperBound {
+                        column,
+                        max: bound - 1,
+                        inclusive: true,
+                    };
+                }
+            }
+        }
     }
 
     // The same three measuring functions the other way up. `>= N` is a floor
@@ -525,6 +683,41 @@ pub fn interpret(definition: &str) -> Meaning {
                 }
                 return Meaning::Unknown;
             }
+        }
+    }
+
+    // `num_nonnulls(a, b, ...) = N` where N is how many arguments there are:
+    // every one of them holds a value, which is what happens anyway. And
+    // `>= 1` or `> 0`, which is at-least-one and satisfied the same way.
+    for (operator, wanted) in [("=", None), (">=", Some(1i64)), (">", Some(0))] {
+        let Some((left, right)) = split_top(expression, operator) else {
+            continue;
+        };
+        if operator == "=" && (left.ends_with(['<', '>', '!']) || right.starts_with('=')) {
+            continue;
+        }
+        if operator == ">" && (right.starts_with('=') || left.ends_with(['<', '>', '!'])) {
+            continue;
+        }
+        let Some(arguments) = call_argument(left, "num_nonnulls") else {
+            continue;
+        };
+        let columns: Vec<Option<String>> = split_top_all(arguments)
+            .iter()
+            .map(|a| column_cast(a))
+            .collect();
+        if columns.len() < 2 || !columns.iter().all(Option::is_some) {
+            continue;
+        }
+        let columns: Vec<String> = columns.into_iter().flatten().collect();
+        let bound = integer_bound(right);
+        let matches = match wanted {
+            // `= N` only when N is every argument.
+            None => bound == Some(columns.len() as i64),
+            Some(n) => bound == Some(n),
+        };
+        if matches {
+            return Meaning::AtLeastOneNonNull { columns };
         }
     }
 
@@ -757,8 +950,7 @@ mod tests {
             // each needs its own shape rather than being folded into a
             // neighbour on the grounds of looking similar.
             "CHECK ((num_nonnulls(a, b) <= 1))",
-            "CHECK ((num_nonnulls(a, b) > 0))",
-            "CHECK ((num_nonnulls(a, b) = 2))",
+            "CHECK ((num_nonnulls(a, b, c) = 2))",
             "CHECK ((num_nonnulls(a) = 1))",
             "CHECK (((num_nonnulls(a, b) = 1) OR (num_nulls(a, b) = 2)))",
             "CHECK ((num_nonnulls(a, lower(b)) = 1))",
@@ -799,6 +991,128 @@ mod tests {
         );
         assert_eq!(
             interpret("CHECK ((status <> ANY (ARRAY['a'::text])))"),
+            Meaning::Unknown
+        );
+    }
+
+    #[test]
+    fn at_least_one_and_all_of_them_are_read_as_the_obligations_they_are() {
+        // `> 0` and `>= 1` are at-least-one; `= N` over N arguments is all of
+        // them. Each is satisfied by filling every column, which is what
+        // happens anyway — so each has its own meaning rather than being
+        // folded into `= 1`, which is a different rule entirely.
+        for definition in [
+            "CHECK ((num_nonnulls(a, b) > 0))",
+            "CHECK ((num_nonnulls(a, b) >= 1))",
+            "CHECK ((num_nonnulls(a, b) = 2))",
+        ] {
+            assert_eq!(
+                interpret(definition),
+                Meaning::AtLeastOneNonNull {
+                    columns: vec!["a".into(), "b".into()]
+                },
+                "{definition}"
+            );
+        }
+        // `= 2` over three arguments is two of the three, which is neither.
+        assert_eq!(
+            interpret("CHECK ((num_nonnulls(a, b, c) = 2))"),
+            Meaning::Unknown
+        );
+        // And nulling them all still satisfies `<= 1`, which is a different
+        // obligation and stays out.
+        assert_eq!(
+            interpret("CHECK ((num_nonnulls(a, b) <= 1))"),
+            Meaning::Unknown
+        );
+    }
+
+    #[test]
+    fn a_conjunction_is_read_as_its_parts_only_when_every_part_is_understood() {
+        // Both halves known: two obligations, both recorded.
+        let both =
+            interpret_all("CHECK (((char_length(name) <= 32) AND (char_length(name) >= 3)))");
+        assert_eq!(
+            both,
+            vec![
+                Meaning::LengthLimit {
+                    column: "name".into(),
+                    max: 32
+                },
+                Meaning::MinLength {
+                    column: "name".into(),
+                    min: 3
+                }
+            ]
+        );
+        // One half unknown makes the whole thing unknown. Satisfying the half
+        // that is recognised and ignoring the other is the silent pass this
+        // whole project is built against.
+        assert_eq!(
+            interpret_all("CHECK (((char_length(name) <= 32) AND (name ~ '^[a-z]+$'::text)))"),
+            vec![Meaning::Unknown]
+        );
+        // OR is never split: a disjunction is satisfied by either side and
+        // there is no basis here for choosing which.
+        assert_eq!(
+            interpret_all("CHECK (((char_length(a) <= 4) OR (char_length(b) <= 4)))"),
+            vec![Meaning::Unknown]
+        );
+    }
+
+    #[test]
+    fn a_single_permitted_value_is_a_value_set_of_one() {
+        assert_eq!(
+            interpret("CHECK ((lock = 'X'::bpchar))"),
+            Meaning::ValueSet {
+                column: "lock".into(),
+                values: vec!["'X'::bpchar".into()]
+            }
+        );
+        assert_eq!(
+            interpret("CHECK ((notify_owner = false))"),
+            Meaning::ValueSet {
+                column: "notify_owner".into(),
+                values: vec!["false".into()]
+            }
+        );
+        // A column compared with an expression is not a permitted value.
+        assert_eq!(
+            interpret("CHECK ((date = date_trunc('month'::text, date)))"),
+            Meaning::Unknown
+        );
+    }
+
+    #[test]
+    fn a_ceiling_on_a_number_is_read_the_same_way_as_a_floor() {
+        assert_eq!(
+            interpret("CHECK ((rollout <= 10000))"),
+            Meaning::UpperBound {
+                column: "rollout".into(),
+                max: 10000,
+                inclusive: true
+            }
+        );
+        // A strict ceiling is the inclusive one a step down, for the column
+        // and for its length alike.
+        assert_eq!(
+            interpret("CHECK ((attempt < 20))"),
+            Meaning::UpperBound {
+                column: "attempt".into(),
+                max: 19,
+                inclusive: true
+            }
+        );
+        assert_eq!(
+            interpret("CHECK ((char_length(queue) < 128))"),
+            Meaning::LengthLimit {
+                column: "queue".into(),
+                max: 127
+            }
+        );
+        // Against another column it is a comparison, not a bound.
+        assert_eq!(
+            interpret("CHECK ((attempt <= max_attempts))"),
             Meaning::Unknown
         );
     }

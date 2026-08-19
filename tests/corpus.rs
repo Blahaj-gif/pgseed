@@ -167,33 +167,7 @@ fn measure(name: &str, path: &Path, max_lost: usize) -> Coverage {
     for statement in statements(&sql) {
         // Only the DDL that makes tables and constraints. Everything else in a
         // production dump is noise for this purpose.
-        let head = statement.trim_start().to_uppercase();
-        // Functions and extensions are not the subject, but a column default
-        // that calls one takes its whole CREATE TABLE down with it, and a lost
-        // table is a table this never got to be measured against.
-        if !(head.starts_with("CREATE TABLE")
-            || head.starts_with("ALTER TABLE")
-            || head.starts_with("CREATE TYPE")
-            || head.starts_with("CREATE DOMAIN")
-            || head.starts_with("CREATE SEQUENCE")
-            || head.starts_with("CREATE FUNCTION")
-            || head.starts_with("CREATE OR REPLACE FUNCTION")
-            || head.starts_with("CREATE EXTENSION")
-            || head.starts_with("CREATE SCHEMA")
-            // Unique indexes are a uniqueness requirement exactly like a
-            // unique constraint, and skipping them made this measure a
-            // database less constrained than the real one — which is the one
-            // way a gate can flatter itself.
-            || head.starts_with("CREATE INDEX")
-            || head.starts_with("CREATE UNIQUE INDEX")
-            // A trigger is a rule about what may be written, and Discourse has
-            // one that raises on insert. Leaving them out made this measure a
-            // database that could not refuse what the real one refuses — the
-            // third time that has been true here, after unique indexes and
-            // after a comment banner swallowed the statement following it.
-            || head.starts_with("CREATE TRIGGER")
-            || head.starts_with("CREATE OR REPLACE TRIGGER"))
-        {
+        if !corpus_shared::shapes_the_schema(&statement) {
             continue;
         }
         match client.batch_execute(&statement) {

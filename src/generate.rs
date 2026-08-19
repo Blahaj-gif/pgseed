@@ -29,6 +29,8 @@ use crate::schema::{Column, ColumnType, Table, TableId};
 #[derive(Debug, Clone, Default)]
 pub struct Bounds {
     pub max_length: Option<i32>,
+    /// A ceiling on a generated number, from `col <= N`. The mirror of `min`.
+    pub max: Option<i64>,
     /// A floor on the length, from `char_length(col) >= N`. Satisfied by
     /// padding, which is provable in a way that hoping the word list is long
     /// enough is not.
@@ -60,81 +62,93 @@ pub struct Bounds {
 pub fn bounds_for(table: &Table) -> BTreeMap<String, Bounds> {
     let mut out: BTreeMap<String, Bounds> = BTreeMap::new();
     for check in &table.checks {
-        match checks::interpret(&check.definition) {
-            Meaning::LengthLimit { column, max } => {
-                let entry = out.entry(column).or_default();
-                // The tightest limit wins: two constraints on one column both
-                // have to hold.
-                entry.max_length = Some(entry.max_length.map_or(max, |m: i32| m.min(max)));
-            }
-            Meaning::MinLength { column, min } => {
-                // The loosest floor loses: two floors on one column both have
-                // to hold, so the higher one is the binding one.
-                let entry = out.entry(column).or_default();
-                entry.min_length = Some(entry.min_length.map_or(min, |m: i32| m.max(min)));
-            }
-            Meaning::ByteLength { column, exact } => {
-                out.entry(column).or_default().exact_bytes = Some(exact);
-            }
-            Meaning::LowerBound {
-                column,
-                min,
-                inclusive,
-            } => {
-                let floor = if inclusive { min } else { min + 1 };
-                let entry = out.entry(column).or_default();
-                entry.min = Some(entry.min.map_or(floor, |m: i64| m.max(floor)));
-            }
-            Meaning::MustBeNull { column } => {
-                out.entry(column).or_default().must_be_null = true;
-            }
-            Meaning::Lowercase { column } => {
-                out.entry(column).or_default().lowercase = true;
-            }
-            Meaning::ByteLimit { column, max } => {
-                // Every string this generates is ASCII, so a byte ceiling and
-                // a character ceiling are the same ceiling.
-                let entry = out.entry(column).or_default();
-                entry.max_length = Some(entry.max_length.map_or(max, |m: i32| m.min(max)));
-            }
-            Meaning::ValueSet { column, values } => {
-                let entry = out.entry(column).or_default();
-                // Two sets over one column leave only what they share.
-                entry.value_set = Some(match entry.value_set.take() {
-                    Some(existing) => existing
-                        .into_iter()
-                        .filter(|v| values.contains(v))
-                        .collect(),
-                    None => values,
-                });
-            }
-            Meaning::JsonType { column, kind } => {
-                out.entry(column).or_default().json_type = Some(kind);
-            }
-            Meaning::ExactlyOneNonNull { columns } => {
-                // One column carries the value and the rest are obliged to be
-                // null. Which one is decided by `filled_column` so that the
-                // classifier and this cannot disagree — if they did, the
-                // classifier would accept a table on the strength of a choice
-                // nobody made.
-                let keep = filled_column(table, &columns);
-                for column in columns {
-                    if Some(&column) != keep.as_ref() {
-                        out.entry(column).or_default().must_be_null = true;
+        for meaning in checks::interpret_all(&check.definition) {
+            match meaning {
+                Meaning::LengthLimit { column, max } => {
+                    let entry = out.entry(column).or_default();
+                    // The tightest limit wins: two constraints on one column both
+                    // have to hold.
+                    entry.max_length = Some(entry.max_length.map_or(max, |m: i32| m.min(max)));
+                }
+                Meaning::MinLength { column, min } => {
+                    // The loosest floor loses: two floors on one column both have
+                    // to hold, so the higher one is the binding one.
+                    let entry = out.entry(column).or_default();
+                    entry.min_length = Some(entry.min_length.map_or(min, |m: i32| m.max(min)));
+                }
+                Meaning::ByteLength { column, exact } => {
+                    out.entry(column).or_default().exact_bytes = Some(exact);
+                }
+                Meaning::LowerBound {
+                    column,
+                    min,
+                    inclusive,
+                } => {
+                    let floor = if inclusive { min } else { min + 1 };
+                    let entry = out.entry(column).or_default();
+                    entry.min = Some(entry.min.map_or(floor, |m: i64| m.max(floor)));
+                }
+                Meaning::MustBeNull { column } => {
+                    out.entry(column).or_default().must_be_null = true;
+                }
+                Meaning::Lowercase { column } => {
+                    out.entry(column).or_default().lowercase = true;
+                }
+                Meaning::ByteLimit { column, max } => {
+                    // Every string this generates is ASCII, so a byte ceiling and
+                    // a character ceiling are the same ceiling.
+                    let entry = out.entry(column).or_default();
+                    entry.max_length = Some(entry.max_length.map_or(max, |m: i32| m.min(max)));
+                }
+                Meaning::ValueSet { column, values } => {
+                    let entry = out.entry(column).or_default();
+                    // Two sets over one column leave only what they share.
+                    entry.value_set = Some(match entry.value_set.take() {
+                        Some(existing) => existing
+                            .into_iter()
+                            .filter(|v| values.contains(v))
+                            .collect(),
+                        None => values,
+                    });
+                }
+                Meaning::JsonType { column, kind } => {
+                    out.entry(column).or_default().json_type = Some(kind);
+                }
+                Meaning::ExactlyOneNonNull { columns } => {
+                    // One column carries the value and the rest are obliged to be
+                    // null. Which one is decided by `filled_column` so that the
+                    // classifier and this cannot disagree — if they did, the
+                    // classifier would accept a table on the strength of a choice
+                    // nobody made.
+                    let keep = filled_column(table, &columns);
+                    for column in columns {
+                        if Some(&column) != keep.as_ref() {
+                            out.entry(column).or_default().must_be_null = true;
+                        }
                     }
                 }
+                // Every array this generates holds one element, so any limit of
+                // one or more is already met and there is nothing to record.
+                // Nothing to record for any of these. An array limit of one or
+                // more is already met because every array written holds one
+                // element; a non-empty column already is; and at-least-one is
+                // satisfied by filling all of them, which is what happens.
+                Meaning::CardinalityLimit { .. }
+                | Meaning::NonEmpty { .. }
+                | Meaning::AtLeastOneNonNull { .. }
+                | Meaning::NotNull { .. }
+                | Meaning::Unknown => {}
+                Meaning::UpperBound {
+                    column,
+                    max,
+                    inclusive,
+                } => {
+                    let ceiling = if inclusive { max } else { max - 1 };
+                    let entry = out.entry(column).or_default();
+                    // The lowest ceiling binds, the same way the highest floor does.
+                    entry.max = Some(entry.max.map_or(ceiling, |m: i64| m.min(ceiling)));
+                }
             }
-            // Every array this generates holds one element, so any limit of
-            // one or more is already met and there is nothing to record.
-            // Nothing to record for any of these. An array limit of one or
-            // more is already met because every array written holds one
-            // element; a non-empty column already is; and at-least-one is
-            // satisfied by filling all of them, which is what happens.
-            Meaning::CardinalityLimit { .. }
-            | Meaning::NonEmpty { .. }
-            | Meaning::AtLeastOneNonNull { .. }
-            | Meaning::NotNull { .. }
-            | Meaning::Unknown => {}
         }
     }
     out
@@ -376,12 +390,14 @@ fn render(
         ColumnType::Integer { bytes } => {
             // Bounded by the column's own width, so a smallint never overflows,
             // and by any lower bound a CHECK imposed.
-            let ceiling: i64 = match bytes {
+            let width: i64 = match bytes {
                 2 => 32_000,
                 4 => 2_000_000_000,
                 _ => 4_000_000_000_000,
             };
-            let floor = bounds.min.unwrap_or(0).max(0);
+            // The column's own width and any CHECK ceiling, whichever binds.
+            let ceiling = bounds.max.map_or(width, |m| m.min(width));
+            let floor = bounds.min.unwrap_or(0).max(0).min(ceiling);
             let span = (ceiling - floor).max(1);
             // A unique column steps by row rather than rolling again, because
             // rolling twice in a small range collides sooner than anyone
@@ -396,6 +412,7 @@ fn render(
 
         ColumnType::Float { .. } => {
             let floor = bounds.min.unwrap_or(0) as f64;
+            let ceiling = bounds.max.map(|m| m as f64);
             // Stepping by a fraction rather than a whole number, so a unique
             // float column does not collide with a unique integer one beside
             // it for no reason.
@@ -404,7 +421,15 @@ fn render(
             } else {
                 rng.gen_range(0.0..1000.0)
             };
-            Literal(format!("{:.4}", floor + offset))
+            let value = match ceiling {
+                // `readiness_score >= 0 AND readiness_score <= 1` leaves a
+                // range of one, and walking off the top of it is a rejected
+                // row rather than a rounding error.
+                Some(top) if top > floor => floor + (offset % (top - floor)),
+                Some(top) => top.min(floor),
+                None => floor + offset,
+            };
+            Literal(format!("{value:.4}"))
         }
 
         ColumnType::Numeric { precision, scale } => {
@@ -413,7 +438,8 @@ fn render(
             // error that only shows up on the schemas that declare limits.
             let scale = scale.unwrap_or(2).clamp(0, 6);
             let digits = precision.unwrap_or(10).clamp(1, 12) - scale;
-            let ceiling = 10i64.saturating_pow(digits.max(1) as u32) - 1;
+            let declared = 10i64.saturating_pow(digits.max(1) as u32) - 1;
+            let ceiling = bounds.max.map_or(declared, |m| m.min(declared));
             let floor = bounds.min.unwrap_or(0).max(0).min(ceiling);
             let span = (ceiling - floor).max(0);
             let whole = if unique {

@@ -1041,3 +1041,59 @@ fn probing_never_costs_a_table_that_was_already_understood() {
     assert!(outcome.rescued.is_empty());
     assert_eq!(outcome.still_refused.len(), 1);
 }
+
+#[test]
+fn the_conjunctions_and_ceilings_produce_rows_the_database_keeps() {
+    // Every shape added after asking why the corpus still refused what it did.
+    // A closed set widened without the database checking it is a closed set
+    // widened on an argument, and the argument is the thing that has been
+    // wrong before.
+    let (db, _) = seed(
+        "CREATE TABLE bounded (
+             id       int PRIMARY KEY,
+             rollout  int NOT NULL CONSTRAINT bounded_rollout CHECK (rollout >= 0 AND rollout <= 10000),
+             score    double precision NOT NULL CONSTRAINT bounded_score CHECK (score >= 0 AND score <= 1),
+             slot     int NOT NULL CONSTRAINT bounded_slot CHECK (1 <= slot AND slot <= 20),
+             attempts int NOT NULL CONSTRAINT bounded_attempts CHECK (attempts < 5)
+         );
+         CREATE TABLE named (
+             id    int PRIMARY KEY,
+             label text NOT NULL CONSTRAINT named_label
+                 CHECK (char_length(label) <= 32 AND char_length(label) >= 3),
+             queue text NOT NULL CONSTRAINT named_queue
+                 CHECK (char_length(queue) > 0 AND char_length(queue) < 128)
+         );
+         CREATE TABLE pinned (
+             id   int PRIMARY KEY,
+             kind text NOT NULL CONSTRAINT pinned_kind CHECK (kind = 'invoice'),
+             live boolean NOT NULL CONSTRAINT pinned_live CHECK (live = false)
+         );
+         CREATE TABLE cursors (
+             id  int PRIMARY KEY,
+             lo  jsonb NOT NULL,
+             hi  jsonb NOT NULL,
+             CONSTRAINT cursors_both CHECK (num_nonnulls(lo, hi) = 2),
+             CONSTRAINT cursors_arrays CHECK (
+                 jsonb_typeof(lo) = 'array' AND jsonb_typeof(hi) = 'array')
+         );",
+        12,
+    );
+
+    for table in ["bounded", "named", "pinned", "cursors"] {
+        assert_eq!(count(&db, table), 12, "{table}");
+    }
+    // And the bounds really did bind, rather than the values happening to land
+    // inside them.
+    let widest: i32 = db
+        .client()
+        .query_one("SELECT max(rollout) FROM bounded", &[])
+        .unwrap()
+        .get(0);
+    assert!(widest <= 10_000);
+    let longest: i32 = db
+        .client()
+        .query_one("SELECT max(char_length(label)) FROM named", &[])
+        .unwrap()
+        .get(0);
+    assert!((3..=32).contains(&longest));
+}
