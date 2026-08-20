@@ -177,11 +177,45 @@ fn run() -> Result<std::process::ExitCode, String> {
     // Filtering happens after classification, so a table left out is simply
     // not written rather than being reported as refused. Those are different
     // answers and the report must not blur them.
+    // A selection that names a child but not its parent cannot be satisfied,
+    // so the parents come along. Named on the way rather than added quietly:
+    // `--include orders` writing rows into `users` is a surprise the first
+    // time, and a surprise nobody was told about is a bug report.
+    //
+    // Upward only. `dependents_of` goes the other way for `--truncate`, and
+    // pulling in dependents here would turn `--include orders` into "most of
+    // the database" — the thing --include exists to avoid.
+    let asked: Vec<_> = read
+        .tables
+        .values()
+        .map(|t| t.id.clone())
+        .filter(|id| selection.allows(id))
+        .collect();
+    let needed: BTreeSet<_> = ancestors_of(&read, &asked)
+        .into_iter()
+        // An explicit --exclude still wins. The child is then refused for a
+        // reason that can be read, rather than filled with a row that cannot
+        // be shown to be right.
+        .filter(|id| !selection.excludes(id))
+        .collect();
+    if !needed.is_empty() {
+        let names: Vec<String> = needed.iter().map(|id| id.to_string()).collect();
+        eprintln!(
+            "pgseed: also filling {} that the selection depends on: {}",
+            if needed.len() == 1 {
+                "the table"
+            } else {
+                "the tables"
+            },
+            names.join(", ")
+        );
+    }
+
     let mut dropped: BTreeSet<_> = verdict
         .fillable
         .iter()
         .chain(verdict.refused.iter().map(|(id, _)| id))
-        .filter(|id| !selection.allows(id))
+        .filter(|id| !selection.allows(id) && !needed.contains(id))
         .cloned()
         .collect();
     verdict.fillable.retain(|id| !dropped.contains(id));
@@ -395,6 +429,45 @@ fn dependents_of(
             {
                 wanted.insert(table.id.clone());
                 added = true;
+            }
+        }
+    }
+    let targets: BTreeSet<_> = targets.iter().cloned().collect();
+    wanted.difference(&targets).cloned().collect()
+}
+
+/// Every table one of `targets` points at, directly or through another, and is
+/// not already among them.
+///
+/// The mirror of `dependents_of`, and needed for the opposite reason. Emptying
+/// a table requires emptying what references it; *filling* one requires filling
+/// what it references, because a NOT NULL foreign key has nowhere to point
+/// until its parent has rows.
+///
+/// Without this, `--include child` classified `child` as fillable — nothing in
+/// classification knows about the selection — and then aborted the whole run at
+/// write time with a not-null violation on the key column. The failure was
+/// hidden for as long as `--probe` filled every table regardless of what was
+/// asked for, which is to say it was hidden by a second bug.
+fn ancestors_of(
+    schema: &pgseed::schema::Schema,
+    targets: &[pgseed::schema::TableId],
+) -> Vec<pgseed::schema::TableId> {
+    let mut wanted: BTreeSet<_> = targets.iter().cloned().collect();
+    let mut added = true;
+    while added {
+        added = false;
+        let known: Vec<_> = wanted.iter().cloned().collect();
+        for id in known {
+            let Some(table) = schema.get(&id) else {
+                continue;
+            };
+            for fk in &table.foreign_keys {
+                // A self-reference needs no second table, and a cycle is
+                // already handled by the repair machinery.
+                if wanted.insert(fk.references.clone()) {
+                    added = true;
+                }
             }
         }
     }

@@ -68,6 +68,19 @@ impl Selection {
     /// Include wins on silence and exclude wins on conflict: nothing stated
     /// means everything, and a table named by both is left alone. The
     /// destructive reading of an ambiguous instruction is not the one to take.
+    /// Whether `--exclude` names this table outright.
+    ///
+    /// Distinct from `!allows`: a table can fail `allows` merely by not being
+    /// in a non-empty `--include`, which is a much weaker statement than being
+    /// named to `--exclude`. Anything that widens a selection has to respect
+    /// the second and may override the first.
+    pub fn excludes(&self, id: &TableId) -> bool {
+        let qualified = format!("{}.{}", id.schema, id.name);
+        self.exclude
+            .iter()
+            .any(|p| matches(p, &id.name) || matches(p, &qualified))
+    }
+
     pub fn allows(&self, id: &TableId) -> bool {
         let qualified = format!("{}.{}", id.schema, id.name);
         let hit = |patterns: &[String]| {
