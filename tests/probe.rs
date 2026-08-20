@@ -207,3 +207,57 @@ fn what_the_database_fills_for_you() {
         );
     }
 }
+
+/// `--probe` must respect `--include`.
+///
+/// It did not. `probe::run` builds its own optimistic verdict from
+/// `order.tables` — every table in the schema — while `--include` filters
+/// `verdict.fillable` only. So asking for one table and passing `--probe`
+/// offered the whole database to the server.
+///
+/// Found from the outside: pgplan's corpus survey could not measure GitLab or
+/// Sourcegraph inside a seven-minute budget while asking for six tables each.
+#[test]
+fn probe_does_not_fill_tables_that_include_left_out() {
+    let db = Db::start();
+    db.apply(
+        "CREATE TABLE wanted (id serial PRIMARY KEY, name text NOT NULL);
+         CREATE TABLE unwanted (id serial PRIMARY KEY, name text NOT NULL);",
+    );
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pgseed"))
+        .args([
+            "--dsn",
+            &db.url,
+            "--apply",
+            "--rows",
+            "5",
+            "--allow-nonempty",
+            "--probe",
+            "--include",
+            "wanted",
+        ])
+        .output()
+        .expect("pgseed should run");
+    assert!(
+        out.status.success(),
+        "pgseed failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut client = db.client();
+    let wanted: i64 = client
+        .query_one("SELECT count(*) FROM wanted", &[])
+        .unwrap()
+        .get(0);
+    let unwanted: i64 = client
+        .query_one("SELECT count(*) FROM unwanted", &[])
+        .unwrap()
+        .get(0);
+
+    assert_eq!(wanted, 5, "the included table should have been filled");
+    assert_eq!(
+        unwanted, 0,
+        "--include named one table and --probe filled {unwanted} rows into another"
+    );
+}

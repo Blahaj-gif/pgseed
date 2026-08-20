@@ -121,14 +121,34 @@ pub fn run(
 ) -> Result<Outcome, String> {
     let understood: BTreeSet<TableId> = verdict.fillable.iter().cloned().collect();
 
-    // Every table, in an order that satisfies the foreign keys. The refused
-    // ones sit where their dependencies put them, so a rescued parent is
-    // written before the child that would point at it — which is the whole
-    // reason the two passes are one pass. A second pass would have to find its
-    // parents' keys again, and for a parent whose key has no default there is
-    // nowhere to find them but the pool.
+    // Every table the caller asked about, in an order that satisfies the
+    // foreign keys. The refused ones sit where their dependencies put them, so
+    // a rescued parent is written before the child that would point at it —
+    // which is the whole reason the two passes are one pass. A second pass
+    // would have to find its parents' keys again, and for a parent whose key
+    // has no default there is nowhere to find them but the pool.
+    //
+    // "Asked about" rather than `order.tables`: the ordering is built from the
+    // whole schema, before `--include` and `--exclude` are applied, and taking
+    // it wholesale here meant `--probe` offered every table in the database no
+    // matter what was asked for. `pgseed --include orders --probe` filled the
+    // lot. Found from outside this repository — a survey next door asked six
+    // tables of GitLab and could not finish inside seven minutes.
+    //
+    // With no selection given, this is every table and nothing changes.
+    let asked: BTreeSet<TableId> = verdict
+        .fillable
+        .iter()
+        .cloned()
+        .chain(verdict.refused.iter().map(|(id, _)| id.clone()))
+        .collect();
     let optimistic = Verdict {
-        fillable: order.tables.clone(),
+        fillable: order
+            .tables
+            .iter()
+            .filter(|id| asked.contains(id))
+            .cloned()
+            .collect(),
         refused: Vec::new(),
         deferred_constraints: verdict.deferred_constraints,
         deferred_repairs: verdict.deferred_repairs.clone(),
