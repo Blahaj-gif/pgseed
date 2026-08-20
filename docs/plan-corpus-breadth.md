@@ -342,6 +342,44 @@ missing* has an answer that nobody has to estimate.
 
 ---
 
+## Every remaining lever, counted
+
+Reach work reached the point where every candidate looked small, and the only
+way to choose between small things is to count them. `cargo test --test corpus
+-- --ignored levers` counts, per schema, how many tables are refused for
+**exactly one** reason of each kind — because a table refused for three reasons
+is not unlocked by fixing one of them.
+
+Of 863 refused tables:
+
+| refused for exactly this and nothing else | tables |
+|---|---:|
+| a trigger | **220** |
+| entangled foreign keys | 10 |
+| a tagged union | **3** |
+| more than one reason at once | 95 |
+
+Two conclusions, and neither is the one that was expected.
+
+**The tagged union is worth three tables, not six.** It is the largest genuine
+CHECK gap by *constraint* count — 48 of them — and almost every table carrying
+one also carries something else. Counting constraints suggested a lever;
+counting tables says there is none. This project has twice abandoned work at
+two and three tables, and the same threshold applies to its own favourite
+remaining idea. **Not built.**
+
+**Triggers are the largest class by an order of magnitude**, and the answer
+there is already shipped: `--probe` rescues 554 tables across the corpus, and
+the narrowing that would have addressed triggers *by reasoning* was measured at
+two tables and abandoned. Nothing further is owed here.
+
+So the honest statement about coverage is that it is finished. Not perfect —
+207 tables in the corpus can be filled by somebody and are not filled by this —
+but there is no remaining change with a measured return above ten tables, and
+the three largest ideas anybody has proposed are worth 3, 2 and 3.
+
+---
+
 ## Left undone, deliberately
 
 - **Django, SQLAlchemy, TypeORM, Eloquent, Entity Framework.** No fetchable SQL

@@ -875,3 +875,72 @@ fn readme_speed() {
         );
     }
 }
+
+/// What each remaining lever would actually be worth, in tables.
+///
+/// Reach work has reached the point where every candidate is small, and the
+/// only way to choose between small things is to count them. This counts, per
+/// schema, how many tables are refused for *exactly one* reason of each kind —
+/// because those are the ones a fix would unlock, and a table refused for
+/// three reasons is not unlocked by fixing one of them.
+///
+/// `cargo test --test corpus -- --ignored --nocapture levers`
+#[test]
+#[ignore]
+fn levers() {
+    use pgseed::classify::Refusal;
+    let (mut only_tagged, mut only_entangled, mut only_trigger, mut multi, mut total) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
+
+    for source in corpus_shared::sources() {
+        let path = Path::new("tests/corpus").join(&source.file);
+        let Ok(sql) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let db = Db::start();
+        let mut client = db.client();
+        let schemas = corpus_shared::load(&mut client, &sql);
+        let Ok(read) = pgseed::introspect::read(&mut client, &schemas) else {
+            continue;
+        };
+        let order = pgseed::graph::order(&read);
+        let verdict = pgseed::classify::classify(&read, &order);
+
+        let (mut tag, mut ent, mut trg) = (0usize, 0usize, 0usize);
+        for (_id, reasons) in &verdict.refused {
+            total += 1;
+            if reasons.len() > 1 {
+                multi += 1;
+                continue;
+            }
+            match &reasons[0] {
+                Refusal::EntangledForeignKeys { .. } => {
+                    ent += 1;
+                    only_entangled += 1;
+                }
+                Refusal::CheckConstraint { definition, .. } => {
+                    if definition.contains("TRIGGER") {
+                        trg += 1;
+                        only_trigger += 1;
+                    } else if definition.contains("IS NULL") && definition.contains(" = '") {
+                        tag += 1;
+                        only_tagged += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if tag + ent + trg > 0 {
+            println!(
+                "  {:<22} tagged {tag:>3} · entangled {ent:>3} · trigger {trg:>3}",
+                source.name
+            );
+        }
+    }
+    println!(
+        "\n  {total} refused tables. Refused for exactly one reason, by kind:\n    \
+         tagged union {only_tagged}\n    entangled keys {only_entangled}\n    \
+         trigger {only_trigger}\n  (and {multi} refused for more than one reason, \
+         which no single fix unlocks)"
+    );
+}

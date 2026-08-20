@@ -169,8 +169,15 @@ reads 84.9% and 95.8%.
 Neither framing is the honest one on its own. Counting tables is the harder
 test and the one that judges the tool, so it stays the headline. The per-schema
 average is closer to what a reader's own schema will do, since most schemas are
-not GitLab — 21 of the 24 are at 88% or better with `--probe`. The spread
-between them is a fact about the corpus, not a choice about presentation.
+not GitLab: **17 of the 24 reach 100% with `--probe`**, and 21 are at 88% or
+better. The spread between them is a fact about the corpus, not a choice about
+presentation.
+
+What remains unfilled is concentrated rather than spread. After probing, 307
+tables are still empty — and 100 of those can hold no row from anybody, so the
+real gap is **207 tables, 8% of the corpus**. GitLab, Sourcegraph and Zitadel
+account for 291 of the 307 between them; the other twenty-one schemas account
+for sixteen.
 
 The second row excludes
 **100 tables that can hold no row from anybody**: 83 partitioned tables whose
